@@ -1,0 +1,7 @@
+- insert:
+    - id: loom-bootstrap
+      name: dsh-loom/bootstrap
+    - id: loom
+      name: dsh-loom
+- id: agent-loop
+  inject: [loomBootstrap]

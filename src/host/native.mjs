@@ -1,0 +1,143 @@
+import { foldRunEvents } from './events.mjs';
+import { applyPermissionPreset } from '../permissions.mjs';
+
+const retryableIO=new Set(['ETIMEDOUT','EAGAIN','EBUSY','ECONNRESET','ECONNREFUSED','EPIPE']);
+const retryableSession=new Set(['session/not-found','session/writer-held','session/agent-busy','session/workspace-attach-failed']);
+
+export class NativeRunFailure extends Error {
+  constructor(operation,code,cause) {
+    super(`${operation} [${code}]：${cause.message}`,{cause});
+    this.operation=operation;this.code=code;
+  }
+}
+
+async function nativeIO(operation,call,signal) {
+  try { return await call(); }
+  catch(error) {
+    signal.throwIfAborted();
+    const code=error?.code==='gateway/internal'?error.cause?.code:error?.code;
+    if(!retryableIO.has(code) && !retryableSession.has(code)) throw error;
+    throw new NativeRunFailure(operation,code,error);
+  }
+}
+
+export function sameModel(left,right) {
+  return left !== undefined && right !== undefined && left.provider===right.provider && left.model===right.model && left.reasoningEffort===right.reasoningEffort;
+}
+
+/** Adapter to the installed Harness controllers. */
+export class NativeHarness {
+  constructor(ctx,signal,bindWorker=null) { this.ctx=ctx; this.signal=signal; this.bindWorker=bindWorker; }
+
+  workspaces() {
+    return this.ctx.workspaceRegistry.list().map(w=>({workspaceId:w.id,path:w.path,title:w.title}));
+  }
+
+  async modelCatalog() { return this.ctx.sessionController.modelCatalog(); }
+
+  async validateModel(selection) {
+    if(selection===null || selection===undefined) throw new Error('尚未选择执行模型');
+    const catalog=await this.modelCatalog();
+    const provider=catalog.groups.find(group=>group.id===selection.provider);
+    const model=provider?.models.find(item=>item.id===selection.model);
+    if(model===undefined) throw new Error(`模型当前不可用：${selection.provider}/${selection.model}`);
+    if(selection.reasoningEffort!==undefined && !model.reasoning?.efforts.some(e=>e.id===selection.reasoningEffort)) throw new Error('所选模型不支持该推理强度');
+    await this.ctx.llm.resolveCallConfig(selection);
+    return selection;
+  }
+
+  state(sessionId) { return nativeIO('读取会话状态',()=>this.ctx.sessionController.state({sessionId},this.signal),this.signal); }
+
+  activity(sessionId) {
+    return nativeIO('读取会话活动',()=>this.ctx.waterfall('workspace/session-activity',{sessionId},()=>Promise.resolve([])),this.signal);
+  }
+
+  async eventsSince(sessionId,cursor) {
+    const state=await this.state(sessionId);
+    const records=[];
+    let beforeSeq;
+    while(true) {
+      const page=await nativeIO('读取会话事件',()=>this.ctx.sessionController.events({address:{kind:'session',sessionId},throughSeq:state.cursor,maxMessages:200,...(beforeSeq===undefined?{}:{beforeSeq})},this.signal),this.signal);
+      const fresh=page.records.filter(record=>record.event.seq>cursor);
+      records.unshift(...fresh);
+      if(!page.hasMore || page.records.length===0 || page.records[0].event.seq<=cursor) break;
+      const next=page.records[0].event.seq;
+      if(beforeSeq!==undefined && next>=beforeSeq) throw new Error('原生会话分页游标未前移');
+      beforeSeq=next;
+    }
+    return {state,records};
+  }
+
+  async validateAssociation(workspaceId,sessionId) {
+    const workspace=this.ctx.workspaceRegistry.get(workspaceId);
+    if(workspace===undefined) throw new Error('指定工作区已不存在');
+    if(!workspace.sessionIds.includes(sessionId)) throw new Error('执行会话必须属于所选工作区');
+    const state=await this.state(sessionId);
+    const activity=await this.activity(sessionId);
+    if(state.running || activity.length || (state.queue!==null && state.queue.length)) throw new Error('会话仍有活动任务或排队输入，请完成后再关联');
+  }
+
+  async prepare(work,run) {
+    const workspace=this.ctx.workspaceRegistry.get(work.workspaceId);
+    if(workspace===undefined) throw new NativeRunFailure('准备执行','workspace/not-found',new Error('工作所属项目已不存在'));
+    const resolve=()=>nativeIO('解析执行会话',async()=>{
+      const value=await this.ctx.sessionController.resolveAgent(run.sessionId);
+      if('error' in value && value.error.code!=='session/not-found') throw value.error;
+      return value;
+    },this.signal);
+    let resolved=await resolve();
+    if('error' in resolved) {
+      if(run.deliveryAttempts || run.acceptedAt || run.cursor>=0) throw new NativeRunFailure('核对原投递','session/not-found',resolved.error);
+      const created=await nativeIO('创建执行会话',()=>this.ctx.sessionController.create({workspaceId:work.workspaceId,sessionId:run.sessionId}),this.signal);
+      if(created.sessionId!==run.sessionId) throw new Error('原生会话身份冲突，请对账后重新派发');
+      resolved=await resolve();
+      if('error' in resolved) throw new NativeRunFailure('解析新建会话','session/not-found',resolved.error);
+      await nativeIO('命名执行会话',()=>this.ctx.sessionController.rename({sessionId:run.sessionId,title:`Loom · ${work.title}`}),this.signal);
+    }
+    await nativeIO('关联执行会话',()=>workspace.attachSession(run.sessionId),this.signal);
+    const {agent}=resolved;
+    if(this.bindWorker!==null) await this.bindWorker(agent);
+    const observed=await this.eventsSince(run.sessionId,run.cursor);
+    const observation=foldRunEvents(run,observed.records);
+    const queued=observed.state.queue!==null && observed.state.queue.some(item=>item.rpcId===run.requestId);
+    const delivered=observation.admitted || queued;
+    if(delivered) {
+      if(!sameModel(agent.model.current(),run.model)) throw new Error('执行会话模型已偏离获批模型，请重新确认');
+      return {cursor:run.cursor,delivered:true};
+    }
+    if(observed.state.running || (observed.state.queue!==null && observed.state.queue.length)) throw new NativeRunFailure('准备执行','session/agent-busy',new Error('目标会话正在处理其他输入'));
+    await this.validateModel(run.model);
+    const latest=await this.state(run.sessionId);
+    if(latest.running || (latest.queue!==null && latest.queue.length)) throw new NativeRunFailure('准备执行','session/agent-busy',new Error('模型选择期间会话已变为忙碌'));
+    agent.model.select(run.model);
+    if(!sameModel(agent.model.current(),run.model)) throw new Error('执行模型设置读回不一致');
+    if(!run.acceptedAt) applyPermissionPreset(this.ctx,agent.session,run.permissionPreset ?? null);
+    return {cursor:run.deliveryAttempts?run.cursor:latest.cursor,delivered:false};
+  }
+
+  prompt(sessionId,requestId,text,mode='queue') {
+    return nativeIO(mode==='steer'?'投递干预':'投递执行',()=>this.ctx.sessionController.prompt({sessionId,requestId,mode,content:[{type:'text',text}]},this.signal),this.signal);
+  }
+
+  async stop(sessionId) {
+    const resolved=await nativeIO('解析待停止会话',async()=>{
+      const value=await this.ctx.sessionController.resolveAgent(sessionId);
+      if('error' in value && value.error.code!=='session/not-found') throw value.error;
+      return value;
+    },this.signal);
+    if('error' in resolved) {
+      return {stopped:true,detail:[],missing:true};
+    }
+    await nativeIO('停止会话',()=>this.ctx.parallel('workspace/session-stop',{sessionId}),this.signal);
+    const state=await this.state(sessionId);
+    const activity=await this.activity(sessionId);
+    return {stopped:!state.running && !state.queue?.length && activity.length===0,detail:activity};
+  }
+
+  async sessions() {
+    const value=await this.ctx.sessionController.list({},this.signal);
+    const workspaceBySession=new Map();
+    for(const workspace of this.ctx.workspaceRegistry.list()) for(const id of workspace.sessionIds) workspaceBySession.set(id,workspace.id);
+    return value.items.filter(row=>row.origin!=='subagent').map(row=>({sessionId:row.sessionId,title:row.projections?.values.title ?? row.sessionId,workspaceId:workspaceBySession.get(row.sessionId) ?? null,running:row.running}));
+  }
+}

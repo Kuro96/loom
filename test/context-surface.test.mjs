@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { installed, native } from './context-native-helper.mjs';
+import { selectRegion, replaceRegion } from '../src/context/surface.mjs';
+
+test('native surface replacement retains latest intent and whole tool interaction units', {skip:!installed}, () => {
+  const {Session}=native('dsh-session');
+  const {createUserMessage,createSystemMessage,createAssistantMessage,createToolResultMessage}=native('dsh-llm');
+  const user=text=>createUserMessage({source:{kind:'user'},content:[{type:'text',text}]});
+  const session=Session.create('loom-surface');
+  session.append('system/message',{turn:1,step:1,message:createSystemMessage('stable')},{surfaceOp:'append'});
+  const first=session.append('user/message',user('old intent'),{surfaceOp:'append'});
+  session.append('user/message',user('old detail'),{surfaceOp:'append'});
+  const last=session.append('user/message',user('latest intent'),{surfaceOp:'append'});
+  const call=native('dsh-llm').ToolCallId('call-1');
+  const assistant=createAssistantMessage({source:{provider:'loom-test-provider',model:'probe'},content:[{type:'tool-call',id:call,name:'loom_query',arguments:{}}]});
+  session.append('assistant/message',{turn:1,step:1,message:assistant,stream:[]},{surfaceOp:'append'});
+  session.append('tool/result',{turn:1,step:1,message:createToolResultMessage({callId:call,isError:false,content:[{type:'text',text:'result'}]})},{surfaceOp:'append'});
+  const region=selectRegion(session);
+  assert.equal(region.startSeq,first.seq);
+  assert.ok(!region.seqs.includes(last.seq));
+  const originalSeq=session.seq;
+  replaceRegion(session,region,user('checkpoint'));
+  assert.equal(session.seq,originalSeq+1);
+  const messages=session.deriveMessages();
+  assert.deepEqual(messages.map(m=>m.role),['system','user','user','assistant','tool']);
+  assert.equal(messages[2].content[0].text,'latest intent');
+  assert.equal(messages[3].content[0].id,messages[4].toolCallId);
+  assert.throws(()=>replaceRegion(session,region,user('stale checkpoint')),{code:'LOOM_SURFACE_CHANGED'});
+});
