@@ -13,6 +13,7 @@ const actions = {
   native_other: ['执行对话中有待处理请求', '查看待处理请求'],
   result: ['执行已完成，结果待验收', '查看结果'],
   failed: ['执行已结束，需核对失败原因', '查看报告'],
+  external_input: ['外部核对需要补充信息', '查看待补信息'],
   resume: ['工作已暂停，等待继续', '查看工作'],
 };
 
@@ -23,7 +24,8 @@ export function WorkRow({ row, workspaceId, workflowFilter, workflows, workspace
   const action = actions[decision];
   const missingOutput = decision === 'result' && row.work.outputs.some(output => output.required && !Object.hasOwn(row.work.result.outputs, output.name));
   const reason = decision === 'proposal' ? `${row.proposal.definitionSnapshot.stages.length} 项工作待确认` : missingOutput ? '执行已完成，缺少验收所需的结果' : decision === 'execution' && !row.work.model ? '等待选择执行模型'
-    : decision === 'execution' && row.work.modelConsent?.modelRevision === row.work.modelRevision ? '命令检查等待授权' : action?.[0];
+    : decision === 'execution' && row.work.modelConsent?.modelRevision === row.work.modelRevision ? '命令检查等待授权'
+    : decision === 'external_input' ? row.work.wait.missingInformation : action?.[0];
   const context = [project, ...(action ? [reason] : [!workflowFilter && flow, new Date(row.createdAt).toLocaleString()])].filter(Boolean).join(' · ');
   return <button type="button" className="loom-work-row" data-use-id={row.proposal?.id} data-stage-id={row.stageId} data-work-id={row.work?.id}
     aria-label={action ? `${row.title}：${action[1]} · ${context}` : undefined} disabled={Boolean(action && busy)} onClick={action ? () => onDecision(decision) : onDetail}><div>

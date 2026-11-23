@@ -40,6 +40,7 @@ const workDecisionSQL=`CASE
   WHEN status IN ('dispatching','running') THEN ${nativeDecisionSQL}
   WHEN status='review' THEN 'result'
   WHEN status='failed' THEN 'failed'
+  WHEN status='paused' AND json_type(body,'$.wait.missingInformation')='text' THEN 'external_input'
   WHEN status='paused' THEN 'resume'
   END`;
 const workCategorySQL=`CASE WHEN status IN ('accepted','cancelled') THEN 'completed'
@@ -172,6 +173,7 @@ export class LoomStore {
       run.prompt+='\n使用loom_report提交具名结果（kind=result）、外部等待（kind=wait）或回执不确定（kind=uncertain）。报告为候选，检查和验收由Host完成。';
       run.prompt+='\n请在同一次 loom_report 中提交你实际撰写的 document:{english,chinese} Markdown 正文，summary 保留简短摘要。优先使用可用且适用的报告技能。先用简短英文写明结论、证据、未决事项或所需决定，术语一致；再忠实翻译为自然中文，保留数字、条件和不确定性。';
       run.prompt+='\n完成工作即使没有文件或声明输出也须提交双语正文。outputs 保存声明的交接值，无声明时为 {}。deliverables:[{title,path}] 仅列本次实际直接交给用户的文件，path 使用项目内相对路径；无交付文件时省略或填 []。';
+      run.prompt+='\n遇到外部等待，先核对项目记录、已有交接和原操作回执。已有查询路径时安排下一次只读核对，写明来源、方法、完成条件和时间。只有现有来源无法补齐关键事实时，才记录已查来源与需要用户给出的具体信息。';
       if(work.wait) run.prompt+=`\n恢复操作须先核原操作状态，继续同一operationId；已有远端引用与等待条件：${JSON.stringify(work.wait)}`;
       this.#put('run',run); this.#event('run.reserved',run,{kind:'host'},{runId:run.id,requestId:run.requestId});
       return run;
@@ -346,8 +348,14 @@ export class LoomStore {
       requireValue(candidate && ['wait','uncertain'].includes(candidate.report.kind),'须选择等待或不确定报告');
       const report=candidate.report,work=this.#required('work',run.workId);
       if(report.document) this.#appendDocument(work,run.id,'worker','执行报告',report.document);
-      run.status=report.kind==='wait'?'waiting':'uncertain';work.status=report.kind==='wait'?'waiting':'paused';
-      work.wait=report.kind==='wait'?report.wait:report.uncertainty;run.wait=work.wait;
+      const followUp=report.kind==='uncertain'?report.uncertainty.followUp:undefined;
+      const scheduled=report.kind==='wait' || followUp!==undefined;
+      run.status=scheduled?'waiting':'uncertain';work.status=scheduled?'waiting':'paused';
+      if(followUp) {
+        const {operationId,remoteRef,reason}=report.uncertainty;
+        work.wait={operationId,remoteRef,condition:reason,...followUp};
+      } else work.wait=report.kind==='wait'?report.wait:report.uncertainty;
+      run.wait=work.wait;
       run.summary=report.summary;run.reportCallId=callId;run.cursor=Math.max(run.cursor,eventCursor);run.finishedAt=now();run.settleHash=hash;
       this.#saveWork(work);this.#put('run',run);this.#event('run.reportSettled',run,{kind:'host'},{callId,eventCursor,status:run.status});return run;
     });
@@ -948,6 +956,7 @@ export class LoomStore {
     if(input.type==='work.rework') {
       const work=this.#required('work',input.workId); this.#version(work,input);
       requireValue(['review','accepted','failed','cancelled','paused'].includes(work.status),'当前任务状态不支持返工','INVALID_STATE');
+      requireValue(!work.wait?.missingInformation,'请先补充原操作所需信息','INVALID_STATE');
       const preview=this.#reworkPreview(work.id),feedback=text(input.feedback,'返工反馈');
       const selected=input.rerunWorkIds??[];
       requireValue(Array.isArray(selected) && new Set(selected).size===selected.length && selected.every(id=>preview.affected.some(a=>a.workId===id)),'返工范围须来自当前影响预览');
@@ -971,6 +980,14 @@ export class LoomStore {
     if(input.type==='work.resume') {
       const work=this.#required('work',input.workId); this.#version(work,input);
       requireValue(work.status==='paused','只有已暂停任务可继续','INVALID_STATE');
+      if(work.wait?.missingInformation) {
+        requireValue(actor.kind==='user','补充外部信息须由用户提交','FORBIDDEN');
+        this.#version(work,input,true);
+        const information=text(input.information,'补充信息');
+        bounded(information);
+        const {missingInformation,...reference}=work.wait;
+        work.wait={...reference,information};
+      } else requireValue(input.information===undefined,'当前工作没有待补信息');
       work.status=work.modelConsent?'queued':'awaiting_model';
       return this.#saveWork(work);
     }

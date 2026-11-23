@@ -2,14 +2,15 @@ import {createRequire} from 'node:module';
 import {guardAgent} from '../context/binding.mjs';
 const require=createRequire(import.meta.url);
 const string={type:'string',required:true};
+const optionalString={type:'string'};
 const object=properties=>({type:'object',additionalProperties:false,properties});
 const reference={operationId:string,remoteRef:string};
 const document={...object({english:string,chinese:string}),description:'The worker’s Markdown report: concise English first, then a faithful Chinese translation.'};
 const deliverables={type:'array',items:object({title:string,path:string}),description:'Files delivered directly to the user in this run, with project-relative paths.'};
 const reportSchema={oneOf:[
   object({kind:{type:'string',const:'result',required:true},summary:string,document,deliverables,outputs:{type:'object',additionalProperties:true,required:true}}),
-  object({kind:{type:'string',const:'wait',required:true},summary:string,document,wait:{...object({...reference,condition:string,nextCheckAt:string}),required:true}}),
-  object({kind:{type:'string',const:'uncertain',required:true},summary:string,document,uncertainty:{...object({...reference,reason:string}),required:true}}),
+  object({kind:{type:'string',const:'wait',required:true},summary:string,document,wait:{...object({...reference,condition:string,nextCheckAt:string,checkMethod:optionalString}),required:true}}),
+  object({kind:{type:'string',const:'uncertain',required:true},summary:string,document,uncertainty:{...object({...reference,reason:string,followUp:object({checkMethod:string,nextCheckAt:string}),attempted:optionalString,missingInformation:optionalString}),required:true}}),
 ],required:true};
 
 export function successfulReport(run,events) {
@@ -43,7 +44,7 @@ export function createWorkerBinder(store) {
         const runId=pending.get(exec);pending.delete(exec);
         if(!result.isError) terminalRunId=runId;
       });
-      scoped.tools.register(defineTool({name:'loom_report',description:'Finish this execution with a result, external wait, or uncertain receipt. Include your bilingual document even for results with no files or named outputs. Use an applicable reporting skill if available. Keep handoff values in outputs and list only files actually delivered to the user in deliverables.',
+      scoped.tools.register(defineTool({name:'loom_report',description:'Finish this execution with a result, external wait, or uncertain receipt. For external results, check available project records and the original operation first. Schedule a read-only recheck with wait.checkMethod and nextCheckAt, or uncertainty.followUp when the original receipt is unclear. Ask for missingInformation only when existing sources cannot answer; record the sources checked in attempted. Include the bilingual document. Keep handoff values in outputs and list files delivered to the user in deliverables.',
         parameters:{report:reportSchema},executionMode:()=>({kind:'exclusive'}),
         output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},
         execute:async(args,exec)=>{

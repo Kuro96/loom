@@ -124,7 +124,7 @@ review 为 `{passed,summary,source,evidence}`。检查结果须含布尔 passed�
 
 ```js
 report = {kind:'result', summary, outputs:{name:JsonValue}}
-       | {kind:'wait', summary, wait:{operationId,remoteRef,condition,nextCheckAt}}
+       | {kind:'wait', summary, wait:{operationId,remoteRef,condition,nextCheckAt,checkMethod?}}
        | {kind:'uncertain', summary, uncertainty:{operationId,remoteRef,reason}};
 source = {sessionId,requestId,turn,callId};
 ```
@@ -133,7 +133,7 @@ source = {sessionId,requestId,turn,callId};
 - `reportRun(runId,report,source)` 核 Run/session/requestId 及可提交状态，按 callId 保存候选。Run.reports 固定为 `[{report,source}]`，每个新/迁移 Run 初始化 []。同 callId 同内容重放，冲突为 CONFLICT；每 Run 最多 20 候选。
 - 报告根与嵌套拒绝执行身份及授权字段，如 actor/workId/runId/sessionId/requestId/authorization/modelConsent/checksConsent/permissionPreset/autoAccept。输出须有声明，业务 model 输出作为 JSON 数据保存。
 - operationId 固定为 Work.id，远端引用/条件/原因须为非空文字。nextCheckAt 须是带时区有效日期，在报告时位于未来 30 天以内。
-- `settleReport(runId,{callId,eventCursor})`：wait 将 Run/Work 置 waiting；uncertain 将 Run 置 uncertain、Work 置 paused。保存远端引用，释放活动锁；相同收口幂等。result 使用 finishRun。
+- `settleReport(runId,{callId,eventCursor})`：wait 或带 `uncertainty.followUp:{checkMethod,nextCheckAt}` 的回执将 Run/Work 置 waiting；其他 uncertain 将 Run 置 uncertain、Work 置 paused。`attempted` 与 `missingInformation` 成对记录缺口。待补信息使用用户提交的 `work.resume {workId,expectedVersion,information}` 继续原操作。收口保存远端引用，释放活动锁；相同收口幂等。result 使用 finishRun。
 - `wakeWaiting(at=now(),limit=20)` 将到期 waiting Work 排回 queued，返回本次唤醒数组，上限 200。保留 Work/session/operationId；下一 Run 保存 wait 及原 inputs/consumedResults，提示先核原操作状态。暂停/取消的等待保持状态。
 
 核心保存候选。Host 核同归属 turn 正常结束、对应原生 tool/result 成功、会话 idle 且活动归零，再调用 finishRun/settleReport。Host 负责失败回执诊断、恢复成功事实重建及原生工具终结保护。取消 waiting 结束本地跟踪，保留远端引用供展示及对账。

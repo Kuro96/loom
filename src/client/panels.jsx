@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { applyDefaultModel, blockingReasons, createCommandMemo, saveSettings } from './state.mjs';
 import { Badge, ErrorNotice, Field, InlinePage, Json, ModelPicker } from './components.jsx';
 import { UsagePanel } from './usage-panel.jsx';
-import { GateEvidence, pendingInteraction, retryEvidenceIssue, WorkInputs, WorkOutputs, WorkReport } from './work-result.jsx';
+import { GateEvidence, pendingInteraction, retryEvidenceIssue, SummaryText, WorkInputs, WorkOutputs, WorkReport } from './work-result.jsx';
 
 import { batchActionLabel, reviewLabel } from './reader-fields.mjs';
 
@@ -98,7 +98,8 @@ function ProposedStage({ proposal, definition, stage, busy, onEdit, onReview, on
   </DetailShell>;
 }
 
-function FeedbackForm({ work, api, busy, onAction, onClose, steer }) {
+function FeedbackForm({ work, api, busy, onAction, onClose, mode }) {
+  const external = mode === 'external', steer = mode === 'steer';
   const [feedback, setFeedback] = useState(''), [impact, setImpact] = useState(null), [rerun, setRerun] = useState([]);
   const [error, setError] = useState(null), [sending, setSending] = useState(false);
   const blocked = impact?.works.some(item => liveStates.includes(item.status));
@@ -106,7 +107,8 @@ function FeedbackForm({ work, api, busy, onAction, onClose, steer }) {
     setSending(true); setError(null);
     try {
       let command;
-      if (steer) command = { type: 'work.steer', workId: work.id, expectedVersion: work.version, text: feedback };
+      if (external) command = { type: 'work.resume', workId: work.id, expectedVersion: work.version, information: feedback.trim() };
+      else if (steer) command = { type: 'work.steer', workId: work.id, expectedVersion: work.version, text: feedback };
       else {
         const preview = impact?.preview ?? await api.rpc('query', { kind: 'rework', workId: work.id });
         if (preview.version !== work.version) throw Object.assign(new Error('工作已更新，请重新查看返工影响。'), { code: 'CONFLICT' });
@@ -120,14 +122,16 @@ function FeedbackForm({ work, api, busy, onAction, onClose, steer }) {
     } catch (reason) { setError(reason); }
     finally { setSending(false); }
   }
-  return <section aria-label={steer ? '补充执行要求' : '返工反馈'}>
-    <Field label={steer ? '补充要求' : '需要调整的内容'}><textarea autoFocus aria-label="反馈" rows={3} disabled={sending || Boolean(impact)} value={feedback} onChange={event => setFeedback(event.target.value)} /></Field>
+  const label = external ? '补充外部信息' : steer ? '补充执行要求' : '返工反馈';
+  return <section aria-label={label}>
+    {external && <SummaryText>{work.wait.missingInformation}</SummaryText>}
+    <Field label={external ? '补充信息' : steer ? '补充要求' : '需要调整的内容'}><textarea autoFocus aria-label={external ? '补充信息' : '反馈'} rows={3} disabled={sending || Boolean(impact)} value={feedback} onChange={event => setFeedback(event.target.value)} /></Field>
     {impact && <section aria-label="受影响的工作"><h3>受影响的工作</h3><p className="loom-hint">勾选要重跑的工作，其余保留原结果。</p>
       {impact.works.map(item => <label className="loom-checkbox" key={item.id}><input type="checkbox" disabled={sending} aria-label={`重跑工作 ${item.title}`} checked={rerun.includes(item.id)} onChange={event => setRerun(event.target.checked ? [...rerun, item.id] : rerun.filter(id => id !== item.id))} /><span>{item.title} · <Badge status={item.status} /></span></label>)}
       {blocked && <p className="loom-warning">请先停止受影响的活动工作，再重新核对影响。</p>}
     </section>}
     <ErrorNotice error={error} />
-    <div className="loom-actions"><button type="button" disabled={busy || sending || blocked || !feedback.trim()} onClick={submit}>{steer ? '发送干预' : impact ? '确认返工' : '提交返工'}</button>
+    <div className="loom-actions"><button type="button" disabled={busy || sending || blocked || !feedback.trim()} onClick={submit}>{external ? '提交并继续' : steer ? '发送干预' : impact ? '确认返工' : '提交返工'}</button>
       <button type="button" disabled={sending} onClick={onClose}>返回</button></div>
   </section>;
 }
@@ -146,11 +150,13 @@ export function WorkDetail({ work, works, workspaces = [], workflows = [], sourc
   const beforeRun = ['awaiting_model', 'queued', 'paused'].includes(status);
   const pendingConsent = beforeRun && (work.modelConsent?.modelRevision !== work.modelRevision || work.checks.some(check => check.kind === 'command') && work.checksConsent?.checksRevision !== work.checksRevision);
   const canSteer = ['dispatching', 'running'].includes(status);
-  const canRework = ['review', 'failed'].includes(status) || work.inputChanges.length > 0 && ['accepted', 'paused', 'cancelled'].includes(status);
+  const needsExternalInput = Boolean(work.wait?.missingInformation);
+  const canRework = !needsExternalInput && (['review', 'failed'].includes(status) || work.inputChanges.length > 0 && ['accepted', 'paused', 'cancelled'].includes(status));
   const missingOutput = status === 'review' && work.outputs.some(item => item.required && !Object.hasOwn(work.result.outputs ?? {}, item.name));
   const openForm = kind => setForm({ kind, version: work.version });
   const activeForm = form?.version === work.version ? form.kind : null;
-  const feedbackOpen = activeForm === 'steer' && canSteer || activeForm === 'rework' && canRework;
+  const needsInformation = status === 'paused' && !pendingConsent && needsExternalInput;
+  const feedbackOpen = activeForm === 'steer' && canSteer || activeForm === 'rework' && canRework || activeForm === 'external' && needsInformation;
   const command = type => onAction({ type, workId: work.id, expectedVersion: work.version });
   const blockers = beforeRun ? blockingReasons(work, works) : [];
   const workflow = work.useId ? source?.definitionSnapshot : workflows.find(item => item.id === work.workflowId);
@@ -171,13 +177,14 @@ export function WorkDetail({ work, works, workspaces = [], workflows = [], sourc
     {canSteer && !feedbackOpen && <button type="button" disabled={busy} onClick={() => openForm('steer')}>补充执行要求</button>}
     {work.sessionId && <button type="button" className={interaction ? 'loom-primary' : undefined} onClick={() => onOpenSession(work.sessionId, view)}>查看对话</button>}
     {['queued', 'dispatching', 'running', 'waiting'].includes(status) && <button type="button" disabled={busy} onClick={() => command('work.pause')}>暂停工作</button>}
-    {status === 'paused' && !pendingConsent && <button type="button" disabled={busy} onClick={() => command('work.resume')}>继续工作</button>}
+    {needsInformation && !feedbackOpen && <button className="loom-primary" type="button" disabled={busy} onClick={() => openForm('external')}>补充信息</button>}
+    {status === 'paused' && !pendingConsent && !needsInformation && <button type="button" disabled={busy} onClick={() => command('work.resume')}>继续工作</button>}
     {onCancel && !['accepted', 'cancelled', 'cancel_requested'].includes(status) && <button type="button" disabled={busy} onClick={() => onCancel(work)}>取消工作</button>}
     {status === 'accepted' && onSave && <button type="button" disabled={busy} onClick={() => onSave(work)}>保存为工作流</button>}
     {onDelete && !liveStates.includes(status) && <button type="button" className="loom-danger-text" disabled={busy} onClick={() => onDelete(work)}>删除工作</button>}
   </>}>
     {pendingConsent && (!work.model || activeForm === 'model') && <ModelChoice key={work.modelRevision} work={work} catalog={catalog} busy={busy} onAction={onAction} />}
-    {feedbackOpen && <FeedbackForm work={work} api={api} busy={busy} onAction={onAction} onClose={() => setForm(null)} steer={canSteer} />}
+    {feedbackOpen && <FeedbackForm key={activeForm} work={work} api={api} busy={busy} onAction={onAction} onClose={() => setForm(null)} mode={activeForm} />}
     {gatePending && <GateEvidence work={work} works={works} busy={busy} onRelease={() => command('work.releaseGate')} onOpenFile={onOpenFile} onOpenReport={onOpenReport} />}
     {!gatePending && blockers.length > 0 && <ul className="loom-blockers">{blockers.map((reason, index) => <li key={index}>{reason}</li>)}</ul>}
     {missingOutput && <p className="loom-warning">缺少验收所需的结果，请发起返工。</p>}

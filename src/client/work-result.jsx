@@ -32,9 +32,9 @@ function Checks({ checks }) {
 }
 function WaitDetail({ wait, status }) {
   if (!wait) return null;
-  return <section aria-label="外部操作"><h3>{status === 'waiting' ? '等待外部结果' : wait.reason ? '远端结果待核实' : '远端操作'}</h3>
-    <dl className="loom-summary"><dt>远端引用</dt><dd>{wait.remoteRef}</dd>{wait.condition && <><dt>恢复条件</dt><dd>{wait.condition}</dd></>}{wait.nextCheckAt && <><dt>下次检查</dt><dd>{new Date(wait.nextCheckAt).toLocaleString()}</dd></>}{wait.reason && <><dt>待处理原因</dt><dd>{wait.reason}</dd></>}</dl>
-    {status === 'cancelled' ? <p className="loom-warning">本地跟踪已结束 · 远端操作状态需另行核实</p> : <p className="loom-hint">恢复时先核对原远端操作。</p>}
+  return <section aria-label="外部操作"><h3>{wait.missingInformation ? '需要补充信息' : status === 'waiting' ? '等待外部结果' : wait.reason ? '远端结果待核实' : '远端操作'}</h3>
+    <dl className="loom-summary"><dt>远端引用</dt><dd>{wait.remoteRef}</dd>{wait.condition && <><dt>恢复条件</dt><dd>{wait.condition}</dd></>}{wait.checkMethod && <><dt>核对方法</dt><dd>{wait.checkMethod}</dd></>}{wait.nextCheckAt && <><dt>下次检查</dt><dd>{new Date(wait.nextCheckAt).toLocaleString()}</dd></>}{wait.reason && <><dt>待处理原因</dt><dd>{wait.reason}</dd></>}{wait.attempted && <><dt>已查来源</dt><dd>{wait.attempted}</dd></>}{wait.missingInformation && <><dt>需要补充</dt><dd>{wait.missingInformation}</dd></>}</dl>
+    {status === 'cancelled' ? <p className="loom-warning">本地跟踪已结束 · 远端操作状态需另行核实</p> : status === 'waiting' && <p className="loom-hint">调度器会在到期后继续核对这笔操作。</p>}
   </section>;
 }
 

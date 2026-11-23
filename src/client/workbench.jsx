@@ -318,7 +318,7 @@ export function LoomPanel(props) {
   function openWorkDecision(row, decision) {
     if (decision === 'proposal') return reviewUse(row.proposal);
     const { work } = row;
-    selectWork(work, null, decision === 'result' ? '输出' : decision === 'failed' ? '报告' : '输入', decision !== 'execution');
+    selectWork(work, null, decision === 'result' ? '输出' : ['failed', 'external_input'].includes(decision) ? '报告' : '输入', decision !== 'execution');
   }
   const guardedBusy = busy || loading || Boolean(connectionError);
   const railOpen = railPreference ?? Boolean(workspaces.length || list?.rows.length || snapshot?.uses.total || workflows.length);

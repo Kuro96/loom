@@ -93,6 +93,28 @@ test('pending proposal opens the batch review and requires explicit confirmation
   assert.equal(store.query({ kind: 'work' }).total, 2);
 });
 
+test('the pending work row opens the specific external question and resumes the same work', async t => {
+  const store = database(t), user = { kind: 'user' };
+  const item = createRecord(store, 'work', '核对回执', { model: { provider:'p', model:'m' } });
+  const work = store.command({ type:'work.confirm', workId:item.id, expectedVersion:item.version }, user);
+  const run = store.reserveRun(work.id), missingInformation = '请提供新版回执目录';
+  store.reportRun(run.id, { kind:'uncertain', summary:'缺新地址', uncertainty:{ operationId:work.id, remoteRef:'receipt:17', reason:'旧目录停用', attempted:'已查项目手册', missingInformation } },
+    { sessionId:run.sessionId, requestId:run.requestId, turn:1, callId:'external-question' });
+  store.settleReport(run.id, { callId:'external-question', eventCursor:2 });
+  const view = await mount(t, { store });
+  const row = view.renderer.root.findByProps({ 'data-work-id': item.id });
+  assert.match(row.props['aria-label'], /查看待补信息.*新版回执目录/);
+  await act(async () => row.props.onClick());
+  assert.match(JSON.stringify(view.renderer.toJSON()), /已查项目手册/);
+  await act(async () => view.button('补充信息').props.onClick());
+  assert.equal(view.button('提交并继续').props.disabled, true);
+  await act(async () => view.renderer.root.findByProps({ 'aria-label':'补充信息' }).props.onChange({ target:{ value:'replies/new/' } }));
+  await act(async () => view.button('提交并继续').props.onClick());
+  assert.equal(store.getWork(item.id).status,'queued');
+  assert.equal(store.getWork(item.id).wait.information,'replies/new/');
+  assert.equal(store.query({ kind:'work', categories:['interaction'] }).total,0);
+});
+
 test('a pending standalone work can replace an unavailable execution model before approval', async t => {
   const store = database(t), item = createRecord(store, 'work', '核对原图', { model: { provider: 'p', model: 'retired' } });
   const view = await mount(t, { store, catalog: { groups: [{ id:'p', name:'研发', models:[{ id:'current', name:'可用模型' }] }] } });

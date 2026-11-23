@@ -161,13 +161,28 @@ export function reportSchema(report,work) {
     if(report.deliverables!==undefined) checkDeliverables(report.deliverables);
     for(const name of Object.keys(report.outputs)) requireValue(work.outputs.some(o=>o.name===name),'报告含未声明输出');
   } else {
-    const value=report[payload],allowed=report.kind==='wait'?['operationId','remoteRef','condition','nextCheckAt']:['operationId','remoteRef','reason'];
+    const value=report[payload],allowed=report.kind==='wait'?['operationId','remoteRef','condition','nextCheckAt','checkMethod']:['operationId','remoteRef','reason','followUp','attempted','missingInformation'];
     requireValue(Object.keys(value).every(k=>allowed.includes(k)),'外部操作格式错误');
     requireValue(value.operationId===work.id,'operationId须对应当前工作');text(value.remoteRef,'远端引用');
     if(report.kind==='wait') {
-      text(value.condition,'等待条件');const due=zonedTime(value.nextCheckAt),current=Date.now();
+      text(value.condition,'等待条件');
+      if(value.checkMethod!==undefined) text(value.checkMethod,'核对方法');
+    } else {
+      text(value.reason,'结果不明原因');
+      if(value.followUp!==undefined) {
+        object(value.followUp,'复查安排');
+        requireValue(Object.keys(value.followUp).every(k=>['checkMethod','nextCheckAt'].includes(k)) && value.missingInformation===undefined,'复查安排与需用户补充的信息须择一');
+        text(value.followUp.checkMethod,'核对方法');
+      }
+      if(value.attempted!==undefined || value.missingInformation!==undefined) {
+        text(value.attempted,'已核对的来源');text(value.missingInformation,'需用户补充的信息');
+      }
+    }
+    const schedule=report.kind==='wait'?value:value.followUp;
+    if(schedule) {
+      const due=zonedTime(schedule.nextCheckAt),current=Date.now();
       requireValue(due>current && due-current<=30*24*60*60*1000,'恢复时间须在未来30天内');
-    } else text(value.reason,'结果不明原因');
+    }
   }
   return report;
 }

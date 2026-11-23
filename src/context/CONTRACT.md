@@ -132,7 +132,7 @@ bundle 通过原生启动依赖在 AgentLoop factory 就绪前加载 `dsh-loom/b
 
 工作查询包含 inputs、outputs、result.outputs、wait 和 inputChanges；Run 详情包含实际 inputs、consumedResults、outputs 和 resultVersion。下游引用记录实际消费的工作、执行及结果版本，缺少必需结果时保持等待。
 
-外部等待保存 `{operationId,remoteRef,condition,nextCheckAt}`；回执不明保存远端引用和原因。等待释放本地执行占用，恢复继续原工作及会话并先核原操作；取消本地跟踪后仍保留远端引用。
+外部等待保存 `{operationId,remoteRef,condition,nextCheckAt,checkMethod?}`。回执不明时可通过 `uncertainty.followUp` 安排原操作复查，或记录 `attempted` 与 `missingInformation` 进入待处理。等待释放本地执行占用；到期或用户补充输入后，沿用原工作、主会话及操作标识。取消本地跟踪后仍保留远端引用。
 
 返工前查询 rework，向用户展示受影响工作及消费版本。已有消费者时由用户 API 提交当前 impactToken 和 rerunWorkIds；选定工作沿用原工作及会话，其余保留结果并标记 inputChanges。工作流修改只影响后续使用，原工作通过返工推进同一目标。
 

@@ -53,6 +53,40 @@ test('原生历史跨页读取保留请求归属和报告回执',{skip:!installe
   assert.equal(f.readArtifact('pages.txt'),'205');
 });
 
+test('原生回执不明先安排自动核对，确实缺信息才请求用户补充',{skip:!installed,timeout:20000},async t=>{
+  const f=await engineHost(t),first=await f.createRun({outputs});
+  const followUp={checkMethod:'用登记号 R-17 查回执目录',nextCheckAt:new Date(Date.now()+60000).toISOString()};
+  const reference={operationId:first.workId,remoteRef:'receipt:R-17'};
+  await f.drive(first,[[call('check-first',{kind:'uncertain',summary:'回执尚未到达',uncertainty:{...reference,reason:'上传状态不明',followUp}})]]);
+  await f.engine.observe(f.store.getRun(first.id));
+  const waiting=f.store.getWork(first.workId);
+  assert.equal(waiting.status,'waiting');
+  assert.equal(waiting.wait.checkMethod,followUp.checkMethod);
+  assert.equal(f.store.query({kind:'work',categories:['interaction']}).total,0);
+  await f.restart();
+  f.store.wakeWaiting(followUp.nextCheckAt);
+  const next=f.store.reserveRun(first.workId);await f.attach(next);
+  assert.equal(next.sessionId,first.sessionId);
+  assert.equal(next.operationId,first.workId);
+  assert.match(next.prompt,/用登记号 R-17 查回执目录/);
+  const missingInformation='请提供新的回执目录位置';
+  await f.drive(next,[[call('missing-receipt',{kind:'uncertain',summary:'需要新的回执来源',uncertainty:{...reference,reason:'原目录停用',attempted:'已查登记表和项目手册',missingInformation}})]]);
+  await f.engine.observe(f.store.getRun(next.id));
+  const blocked=f.store.getWork(first.workId);
+  assert.equal(blocked.status,'paused');
+  assert.equal(blocked.wait.missingInformation,missingInformation);
+  assert.deepEqual(f.store.query({kind:'work',categories:['interaction'],includeDecision:true}).decisions,['external_input']);
+  const resume={type:'work.resume',workId:blocked.id,expectedVersion:blocked.version};
+  assert.throws(()=>f.store.command(resume,{kind:'user'}),{code:'INVALID_INPUT'});
+  assert.throws(()=>f.store.command({...resume,information:'新目录 replies/'},{kind:'agent',sessionId:'bus'}),{code:'FORBIDDEN'});
+  assert.throws(()=>f.store.command({type:'work.rework',workId:blocked.id,feedback:'继续'},{kind:'agent',sessionId:'bus'}),{code:'INVALID_STATE'});
+  f.store.command({...resume,information:'新目录 replies/'},{kind:'user'});
+  const resumed=f.store.reserveRun(first.workId);
+  assert.equal(resumed.sessionId,first.sessionId);
+  assert.equal(resumed.operationId,first.workId);
+  assert.match(resumed.prompt,/新目录 replies\//);
+});
+
 test('等待后重开SQLite及原生持久会话沿用操作身份提交新结果',{skip:!installed,timeout:20000},async t=>{
   const f=await engineHost(t),first=await f.createRun({outputs});
   const wait={operationId:first.workId,remoteRef:'operation:resume',condition:'ready',nextCheckAt:new Date(Date.now()+60000).toISOString()};
