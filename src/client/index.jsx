@@ -7,7 +7,7 @@ import { documentViews } from './document-views.jsx';
 import { sessionNavigation, SessionReturn } from './session-return.jsx';
 
 export const name = 'loom';
-export const inject = ['connection', 'slots', 'sessions', 'uiSession', 'uiWorkspace', 'conversation', 'layout', 'sidebarRight', 'remote', 'remote.workspaceFiles', 'locale', 'documentPreviews', 'fileDrag'];
+export const inject = ['connection', 'slots', 'sessions', 'uiSession', 'uiWorkspace', 'conversation', 'layout', 'remote', 'remote.workspaceFiles', 'locale', 'documentPreviews', 'fileDrag'];
 
 function EmbeddedConversation({ renderFactorySlot }) {
   return renderFactorySlot('conversation.content', { variant: 'embedded', phase: 'active', hero: false });

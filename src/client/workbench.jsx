@@ -307,12 +307,11 @@ export function LoomPanel(props) {
   const detailWorks = dependencies.workId === focusedWork?.id
     ? [...new Map([...works, ...dependencies.items].map(work => [work.id, work])).values()] : works;
   function openNativeSession(sessionId,view,work=focusedWork) {
-    const from = {...origin(view),trail};
     return run(async () => {
       const sessions = await api.rpc('nativeSessions', {});
       if (!viewIsCurrent() || currentSurface.current !== surface) return false;
       if (busPending || connectionError || !work || work.sessionId !== sessionId || work.workspaceId === status.context.workspaceId || !sessions.some(s=>s.sessionId===sessionId && s.workspaceId===work.workspaceId)) throw new Error('工作对话暂不可用，请稍后重试。');
-      openMain(sessionId, from);
+      return openMain(sessionId, { ...origin(view), trail });
     }, '已打开工作对话。');
   }
   function openWorkDecision(row, decision) {

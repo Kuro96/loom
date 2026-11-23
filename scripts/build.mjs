@@ -7,7 +7,7 @@ await mkdir(new URL('../lib/',import.meta.url),{recursive:true});
 await build({entryPoints:['src/index.mjs'],outfile:'lib/index.js',bundle:true,platform:'node',format:'esm',target:'node24',packages:'external',sourcemap:true});
 await build({entryPoints:['src/bootstrap.mjs'],outfile:'lib/bootstrap.js',bundle:true,platform:'node',format:'esm',target:'node24',packages:'external',sourcemap:true});
 const id=JSON.stringify(manifest.name);
-const result=await build({entryPoints:['src/client/index.jsx'],outfile:'lib/client.js',bundle:true,write:false,platform:'browser',format:'cjs',target:'es2022',jsx:'automatic',external:['react','react/*','@deepseek-ai/dsh-client-ui-primitives'],banner:{js:`window.__ModuleLoader__.load({id:${id},factory:function(require){var module={exports:{}};var exports=module.exports;`},footer:{js:'return module.exports;}});'},sourcemap:true});
+const result=await build({entryPoints:['src/client/index.jsx'],outfile:'lib/client.js',bundle:true,write:false,platform:'browser',format:'cjs',target:'es2022',jsx:'automatic',external:['react','react/*','react-dom','@deepseek-ai/dsh-client-ui-primitives'],banner:{js:`window.__ModuleLoader__.load({id:${id},factory:function(require){var module={exports:{}};var exports=module.exports;`},footer:{js:'return module.exports;}});'},sourcemap:true});
 const css=result.outputFiles.find(f=>f.path.endsWith('.css')).text;
 for(const f of result.outputFiles.filter(f=>f.path.endsWith('.js')||f.path.endsWith('.js.map'))) await writeFile(f.path, f.path.endsWith('.js')?f.text.replace(' + __LOOM_DOCUMENT_CSS__',()=>` + ${JSON.stringify(css)}`):f.contents);
 // Publish DSH's original worker-equipped viewer chunks under the current bundle's loader identity.
