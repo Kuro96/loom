@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { installed } from './context-native-helper.mjs';
-import { startupHost, testModel as model } from './host-native-helper.mjs';
+import { startupHost, testModel as model, wireText } from './host-native-helper.mjs';
 import { createLoomContext } from '../src/context/index.mjs';
 import { LoomStore } from '../src/core/store.mjs';
 import { DEFAULT_CONTEXT, prefixDigest } from '../src/context/budget.mjs';
@@ -51,7 +51,7 @@ test('acceptance separates the current work requirements from shared workflow co
     const outputs={artifact:{batch:run.inputs.batch,status:'completed'}};
     await host.manager.evaluateWork(work,host.candidate(run,outputs,'scope'),[],AbortSignal.timeout(5000));
     assert.equal(host.received.length,1);
-    const evidence=JSON.parse(host.received[0].messages.find(message=>message.role==='user').content);
+    const evidence=JSON.parse(wireText(host.received[0].messages.find(message=>message.role==='user')));
     assert.equal(evidence.work.description,host.definition.stages[1].instructions);
     assert.deepEqual(evidence.work.workflowContext,work.definitionSnapshot);
     assert.equal(Object.hasOwn(evidence.work,'definitionSnapshot'),false);
@@ -69,7 +69,7 @@ test('native acceptance request contains actual inputs, consumed result versions
     const badReview=await host.manager.evaluateWork(work,host.candidate(run,wrong,'wrong'),[],AbortSignal.timeout(5000));
     const goodReview=await host.manager.evaluateWork(work,host.candidate(run,right,'right'),[],AbortSignal.timeout(5000));
     assert.equal(host.received.length,2);
-    const [bad,good]=host.received.map(wire=>JSON.parse(wire.messages.find(m=>m.role==='user').content));
+    const [bad,good]=host.received.map(wire=>JSON.parse(wireText(wire.messages.find(m=>m.role==='user'))));
     assert.notDeepEqual(bad,good,'different batches require different acceptance evidence');
     assert.deepEqual(bad.run.inputs,run.inputs);
     assert.ok(run.consumedResults.length>0);

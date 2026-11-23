@@ -6,7 +6,7 @@ import { TextBody } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/src
 import { ImageBody } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/src/client/image/ImageBody.tsx';
 import { ZoomViewport, zoomSurfaceClass } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/src/client/zoom/ZoomViewport.tsx';
 import { excelFormat } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/src/client/excel/format.ts';
-import { Config } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/src/config.ts';
+import { EXCEL_DEFAULTS } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/src/defaults.ts';
 
 
 const namespaces = {markdown:'documentMarkdown', code:'sidebarCodePreview', image:'sidebarImage', pdf:'sidebarPdf', excel:'sidebarExcel', html:'documentHtml'};
@@ -24,7 +24,7 @@ export function documentViews(ctx, load = file => require.async(file)) {
       return 'text';
     },
     pdf:lazyBody('./client.pdf.js','PdfBody'), excel:lazyBody('./client.excel.js','ExcelBody'),
-    limits:Config(globalThis.__DSH_DOCUMENT_PREVIEW_CONFIG__ ?? {}).excel,
+    limits:EXCEL_DEFAULTS,
     t:kind => ctx.locale.bind(namespaces[kind]), fileDrag:ctx.fileDrag.actions,
   };
 }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { installed, native } from './context-native-helper.mjs';
-import { startupHost, testModel } from './host-native-helper.mjs';
+import { startupHost, testModel, wireText } from './host-native-helper.mjs';
 import { createLoomContext } from '../src/context/index.mjs';
 
 test('periodic review sends one historical region and uses its checkpoint in the next bus request',{skip:!installed},async()=>{
@@ -25,11 +25,13 @@ test('periodic review sends one historical region and uses its checkpoint in the
     agent.followup(latest);await agent.whenIdle();
     assert.equal(host.received.length,3);
     const [,review,main]=host.received;
-    const {history}=JSON.parse(review.messages.find(m=>m.role==='user').content);
+    const {history}=JSON.parse(wireText(review.messages.find(m=>m.role==='user')));
     assert.deepEqual(history,[old]);
     const replacements=agent.session.snapshotEvents().filter(event=>event.type==='user/message' && event.surfaceOp?.op==='replace');
     assert.equal(replacements.length,1);
-    assert.ok(main.messages.some(m=>m.content===replacements[0].data.content[0].text && m.content.includes(summary.summary)));
+    const checkpoint=replacements[0].data.content[0].text;
+    assert.ok(checkpoint.includes(summary.summary));
+    assert.ok(main.messages.some(m=>wireText(m)===checkpoint));
     assert.deepEqual(agent.session.deriveMessages().filter(m=>m.id===latest.id),[latest]);
     assert.equal(manager.getStatus().pending,false);
     context.segmentMaxEvents=1;

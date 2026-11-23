@@ -5,6 +5,12 @@ import {native,nativeHost} from './context-native-helper.mjs';
 import {inject} from '../src/index.mjs';
 
 export const testModel={provider:'loom-test-provider',model:'fixture-flash'};
+// OpenAI Chat Completions accepts either a string or an array of typed content parts.
+export function wireText(message) {
+  const {content}=message;
+  if(typeof content==='string') return content;
+  return (content ?? []).filter(part=>part.type==='text').map(part=>part.text).join('');
+}
 export async function deadline(promise,label,ms=5000) {
   let timer;
   try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(`timeout: ${label}`)),ms);})]);}

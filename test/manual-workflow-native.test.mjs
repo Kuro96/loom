@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { installed } from './context-native-helper.mjs';
-import { startupHost, testModel as model } from './host-native-helper.mjs';
+import { startupHost, testModel as model, wireText } from './host-native-helper.mjs';
 import * as bootstrap from '../src/bootstrap.mjs';
 import * as loom from '../src/index.mjs';
 
@@ -54,7 +54,7 @@ test('installed host generates a draft over the configured model connection with
       assert.equal(wire.model, model.model);
       assert.equal(wire.tools?.length ?? 0, 0);
       assert.equal(wire.messages.length, 2);
-      const evidence = JSON.parse(wire.messages[1].content);
+      const evidence = JSON.parse(wireText(wire.messages[1]));
       assert.equal(evidence.workList, workList);
       assert.deepEqual(evidence.sources.map(source => source.title), ['整理.md', '复核.markdown', 'selected.md']);
       assert.deepEqual(evidence.selectedPaths, ['selected.md']);

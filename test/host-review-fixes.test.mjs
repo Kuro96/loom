@@ -5,12 +5,12 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { installed } from './context-native-helper.mjs';
-import { deadline, startupHost, testModel as model } from './host-native-helper.mjs';
+import { deadline, startupHost, testModel as model, wireText } from './host-native-helper.mjs';
 import { command } from './checks-native-helper.mjs';
 import * as bootstrap from '../src/bootstrap.mjs';
 import * as loom from '../src/index.mjs';
 
-const acceptance=wire=>wire.messages.some(m=>typeof m.content==='string' && m.content.includes('Independently pre-evaluate'));
+const acceptance=wire=>wire.messages.some(m=>wireText(m).includes('Independently pre-evaluate'));
 
 function stream(res,delta,reason='stop') {
   const chunk=choices=>`data: ${JSON.stringify({id:'acceptance-regression',object:'chat.completion.chunk',choices})}\n\n`;
@@ -149,7 +149,7 @@ test('unconfirmed native stop preserves the project lock while another project d
   const release=Promise.withResolvers(), entered=Promise.withResolvers();
   const host=await fixture(async(wire,_req,res)=>{
     if(acceptance(wire)) return stream(res,{content:verdict()});
-    if(wire.messages.some(message=>typeof message.content==='string' && message.content.includes('需要停止的工作'))) {
+    if(wire.messages.some(message=>wireText(message).includes('需要停止的工作'))) {
       entered.resolve();await release.promise;
     }
     report(res,'stop-result');
