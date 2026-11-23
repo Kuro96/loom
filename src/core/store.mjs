@@ -630,6 +630,11 @@ export class LoomStore {
       const result=deleted?{id:target.id,deleted:true}:value;
       if(deleted) this.#event(input.type,target,actor,{version:target.version});
       else if(input.type==='work.addReport') this.#event(input.type,target,actor,{version:target.version,runId:input.runId,documentId:target.documents.at(-1).id});
+      else if(input.type==='work.resolveWait') {
+        const {operationId,handoff,condition,checkMethod,nextCheckAt,missingInformation}=target.wait;
+        this.#event(input.type,target,actor,{version:target.version,operationId,action:input.action,sources:handoff.sources,
+          ...(input.action==='continue'?{information:handoff.information}:input.action==='ask'?{missingInformation}:{condition,checkMethod,nextCheckAt})});
+      }
       else this.#event(input.type,target,actor,{version:target.version??null,
         ...(target.result?.acceptance?{acceptance:target.result.acceptance}:{}),
         ...(target.modelConsent?{modelConsent:target.modelConsent}:{}),

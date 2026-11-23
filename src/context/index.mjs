@@ -143,7 +143,7 @@ export async function createLoomContext(ctx, options) {
         }
         const identity=activeUsage.get(agent.id);
         if(event.type==='step/start' && identity?.turn===event.data.turn) identity.step=event.data.step;
-        if(turn!==null && event.type==='user/message' && event.data.source.kind==='loom-external-wait') automaticWait=event.data.source.workId;
+        if(turn!==null && event.type==='user/message' && event.data.source.kind==='loom-external-wait') automaticWait=event.data.source;
         if(event.type==='step/end' && identity?.turn===event.data.turn) identity.step=null;
         if(event.type==='assistant/message' && event.data.turn===turn) reply=event.data.message;
         if(event.type==='turn/end' && event.data.turn===turn) {
@@ -178,10 +178,11 @@ export async function createLoomContext(ctx, options) {
       });
 
       function resolveCommand(request,actor) {
-        if(automaticWait!==null && (request.type!=='work.resolveWait' || request.workId!==automaticWait)) throw contextError('FORBIDDEN','自动复查只能处理当前外部操作');
+        if(automaticWait!==null && (request.type!=='work.resolveWait' || request.workId!==automaticWait.workId)) throw contextError('FORBIDDEN','自动复查只能处理当前外部操作');
+        if(automaticWait!==null && request.expectedVersion!==automaticWait.expectedVersion) throw contextError('CONFLICT','外部等待版本已变化');
         return command(request,actor);
       }
-      for(const tool of createContextTools({defineTool,query,command:resolveCommand,state,config,sessionId:agent.id,stageDisplay,searchProjectSessions})) scoped.tools.register(tool);
+      for(const tool of createContextTools({defineTool,query,command:resolveCommand,state,config,sessionId:agent.id,stageDisplay,searchProjectSessions,waitScope:()=>automaticWait})) scoped.tools.register(tool);
     }});
     await binding.plugin.await();
     binding.owner=bindingOwner;binding.active=true;
@@ -318,7 +319,8 @@ export async function createLoomContext(ctx, options) {
     if(work===null) return;
     const {createUserMessage}=require('@deepseek-ai/dsh-llm');
     const {operationId,remoteRef}=work.wait;
-    agent.followup(createUserMessage({source:{kind:'loom-external-wait',workId:work.id},content:[{type:'text',text:`[Loom external-wait reminder]\n${JSON.stringify({workId:work.id,workspaceId:work.workspaceId,expectedVersion:work.version,operationId,remoteRef:remoteRef.slice(0,512)})}\n核对本项目相关线索，并以 work.resolveWait 提交协调结果。`}]}));
+    const target={workId:work.id,workspaceId:work.workspaceId,expectedVersion:work.version};
+    agent.followup(createUserMessage({source:{kind:'loom-external-wait',...target},content:[{type:'text',text:`[Loom external-wait reminder]\n${JSON.stringify({...target,operationId,remoteRef:remoteRef.slice(0,512)})}\n核对本项目相关线索，并以 work.resolveWait 提交协调结果。`}]}));
   }
   async function evaluate(work,run,checks,signal) {
     if(disposed) throw contextError('LOOM_DISPOSED','Loom context is disposed');

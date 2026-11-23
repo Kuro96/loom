@@ -132,7 +132,9 @@ bundle 通过原生启动依赖在 AgentLoop factory 就绪前加载 `dsh-loom/b
 
 工作查询包含 inputs、outputs、result.outputs、wait 和 inputChanges；Run 详情包含实际 inputs、consumedResults、outputs 和 resultVersion。下游引用记录实际消费的工作、执行及结果版本，缺少必需结果时保持等待。
 
-工作报告保存原操作 ID、远端引用及复查时间，或交出已经核对的来源和缺口。Host 到期唤醒当前总控；总控可通过 `loom_query` 的 `project.sessionSearch {workId,query}` 读取原生搜索返回的项目会话摘录，也可查项目知识、上游和相关工作结果。以 `work.resolveWait {workId,expectedVersion,operationId,sources,action,...}` 处理同一操作：`continue` 保存带来源的线索并排回原工作，`wait` 设置下次复查，`ask` 保存具体问题并进入待处理。工作队列沿用原 sessionId、操作 ID 和消费版本。取消本地跟踪后仍保留远端引用。
+工作报告保存原操作 ID、远端引用及复查时间，或交出已经核对的来源和缺口。Host 到期唤醒当前总控，提醒失败按工作记录重试。自动轮的查询限本项目，写入绑定提醒的工作与版本。`loom_query` 的 `project.sessionSearch {workId,query}` 读取原工作及同项目其他会话的匹配摘录；`next` 提供续页请求。总控也可查项目知识、上游和相关工作结果。
+
+以 `work.resolveWait {workId,expectedVersion,operationId,sources,action,...}` 处理同一操作：`continue` 保存线索并排回原工作，`wait` 设置下次复查，`ask` 保存具体问题并进入待处理。每次决定及来源各自留在工作事件中。工作队列沿用原 sessionId、操作 ID 和消费版本。取消本地跟踪后仍保留远端引用。
 
 返工前查询 rework，向用户展示受影响工作及消费版本。已有消费者时由用户 API 提交当前 impactToken 和 rerunWorkIds；选定工作沿用原工作及会话，其余保留结果并标记 inputChanges。工作流修改只影响后续使用，原工作通过返工推进同一目标。
 

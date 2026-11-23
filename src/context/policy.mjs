@@ -4,6 +4,8 @@ import { selectRegion, replaceRegion } from './surface.mjs';
 import { FOCUS_MAX_BYTES } from './state.mjs';
 const require=createRequire(import.meta.url);
 const INTENT_PREVIEW_BYTES=2048;
+// The scheduler retries reminders; the native handover record retains checkpoints.
+const recoverableInput=message=>!['runtime-context','loom-external-wait','loom-context'].includes(message.source.kind);
 function* intentCharacters(message) {
   let first=true;
   for(const block of message.content) {
@@ -89,8 +91,9 @@ export class ContextPolicy {
     const {agent,signal}=step;
     this.reconcilePending(agent.session);
     const prior=this.state.pending()?.messages ?? [];
-    let messages=[...new Map([...prior,...step.messages].map(message=>[message.id,message])).values()];
-    if(messages.length) this.state.setPending(messages);
+    const messages=[...new Map([...prior,...step.messages].map(message=>[message.id,message])).values()];
+    let pending=messages.filter(recoverableInput);
+    if(pending.length) this.state.setPending(pending);
     try {
       const latest=messages.filter(message=>message.source.kind==='user').at(-1);
       if(latest) this.state.setFocus({latestIntent:intentPreview(this.state.value.focus,latest)});
@@ -99,8 +102,8 @@ export class ContextPolicy {
       const decision=await next();
       if(decision.kind!=='enter') throw contextError('LOOM_ADMISSION_REJECTED','Native admission rejected the pending input');
       const accepted=[...new Map([...prior,...decision.messages].map(message=>[message.id,message])).values()];
-      messages=accepted.filter(message=>message.source.kind!=='runtime-context');
-      if(messages.length) this.state.setPending(messages);
+      pending=accepted.filter(recoverableInput);
+      if(pending.length) this.state.setPending(pending);
       if(++this.steps>=this.config().reviewEverySteps) {
         this.steps=0;
         const region=selectRegion(agent.session,{incomingMessages:accepted});
@@ -118,7 +121,7 @@ export class ContextPolicy {
       if(JSON.stringify(agent.model.current())!==JSON.stringify(desired)) agent.model.select(desired);
       return {...decision,messages:accepted};
     } catch(error) {
-      this.state.setPending(messages,{code:error.code ?? error.failure?.code ?? 'LOOM_REVIEW_FAILED',retryable:true});
+      if(pending.length) this.state.setPending(pending,{code:error.code ?? error.failure?.code ?? 'LOOM_REVIEW_FAILED',retryable:true});
       throw error;
     }
   }

@@ -123,28 +123,30 @@ export class LoomEngine {
     if(work===null || work.status!=='waiting' || !work.wait.coordination) throw invalid('工作当前没有待协调的外部操作','INVALID_STATE');
     const project=this.ctx.workspaceRegistry.get(work.workspaceId), provider=this.ctx.get('sessionQuery');
     if(!project || !provider) throw invalid('项目会话搜索不可用','LOOM_SESSION_SEARCH_UNAVAILABLE');
-    const ids=[...new Set(project.sessionIds)].filter(id=>id!==work.sessionId).reverse(), offset=request.offset??0;
-    if(!Number.isSafeInteger(offset) || offset<0 || offset>ids.length) throw invalid('会话搜索位置无效','INVALID_INPUT');
+    const ids=[...new Set(project.sessionIds)].reverse(), offset=request.offset??0, {beforeSeq}=request;
+    if(!Number.isSafeInteger(offset) || offset<0 || offset>ids.length || (beforeSeq!==undefined && (!Number.isSafeInteger(beforeSeq)||beforeSeq<0))) throw invalid('会话搜索位置无效','INVALID_INPUT');
     const signal=AbortSignal.any([this.abort.signal,AbortSignal.timeout(10000)]);
     const filters=[{kind:'type',values:['user/message','assistant/message']},{kind:'surface',values:['current']},{kind:'text',text:request.query.trim()}];
     const items=[];
-    let next=offset;
-    for(;next<Math.min(ids.length,offset+8) && items.length<4;next++) {
+    let position=offset, resumeBefore;
+    for(;position<Math.min(ids.length,offset+8) && items.length<4;position++) {
       signal.throwIfAborted();
-      const sessionId=ids[next], hits=await provider.filterEvents(sessionId,filters);
+      const sessionId=ids[position], hits=await provider.filterEvents(sessionId,filters);
       signal.throwIfAborted();
-      const match=hits.at(-1);
-      if(match) {
+      const matches=(position===offset && beforeSeq!==undefined?hits.filter(hit=>hit.seq<beforeSeq):hits).slice(-(5-items.length)).reverse();
+      const remaining=4-items.length;
+      for(const match of matches.slice(0,remaining)) {
         const pos=match.text.toLowerCase().indexOf(request.query.trim().toLowerCase());
         const snippet=Array.from(match.text.slice(Math.max(0,pos-60))).slice(0,240).join('');
         items.push({sessionId,eventSeq:match.seq,snippet:redact(snippet)});
       }
+      if(matches.length>remaining) {resumeBefore=items.at(-1).eventSeq;break;}
     }
     const current=this.store.getWork(work.id);
     if(current===null || current.version!==work.version) throw invalid('外部等待已更新，请重新核对','CONFLICT');
     const allowed=new Set(this.ctx.workspaceRegistry.get(work.workspaceId)?.sessionIds ?? []);
-    const nextOffset=next<ids.length ? next : null;
-    return {workVersion:work.version,hasMore:nextOffset!==null,nextOffset,items:items.filter(({sessionId})=>allowed.has(sessionId))};
+    const next=position<ids.length?{kind:'project.sessionSearch',workId:work.id,query:request.query,offset:position,...(resumeBefore===undefined?{}:{beforeSeq:resumeBefore})}:null;
+    return {workVersion:work.version,hasMore:next!==null,next,items:items.filter(({sessionId})=>allowed.has(sessionId))};
   }
 
   async evaluateAcceptance(work,run,checks,signal) {

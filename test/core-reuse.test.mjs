@@ -233,6 +233,22 @@ test('resumed coordination preserves its schedule and ignores stale wait decisio
   assert.equal(s.reserveRun(w.id).sessionId,run.sessionId);
 });
 
+test('external wait decisions retain their original evidence after another check and reopen',t=>{
+  const f=fixture(t);let s=f.store;
+  const work=approve(s,create(s)),run=s.reserveRun(work.id),report=waitReport(work),due=report.wait.nextCheckAt;
+  s.reportRun(run.id,report,source(run));s.settleReport(run.id,{callId:'report',eventCursor:5,coordinate:true});
+  let claimed=s.claimExternalWait(work.id,s.getWork(work.id).version,due);
+  const command={type:'work.resolveWait',workId:work.id,operationId:work.id};
+  const nextCheckAt=new Date(Date.now()+120000).toISOString();
+  s.command({...command,expectedVersion:claimed.version,action:'wait',condition:'Receipt arrives',checkMethod:'Read ledger',nextCheckAt,sources:['Project ledger']},agent,{coordinatorSessionId:agent.sessionId});
+  claimed=s.claimExternalWait(work.id,s.getWork(work.id).version,nextCheckAt);
+  s.command({...command,expectedVersion:claimed.version,action:'ask',missingInformation:'Which ledger?',sources:['Original receipt']},agent,{coordinatorSessionId:agent.sessionId});
+  s=f.reopen();
+  const decisions=s.query({kind:'event',workId:work.id}).items.filter(event=>event.type==='work.resolveWait').map(({detail:{version,...decision}})=>decision);
+  assert.deepEqual(decisions,[{operationId:work.id,action:'wait',condition:'Receipt arrives',checkMethod:'Read ledger',nextCheckAt,sources:['Project ledger']},
+    {operationId:work.id,action:'ask',missingInformation:'Which ledger?',sources:['Original receipt']}]);
+});
+
 test('rework previews transitive consumers, requires fresh user impact confirmation and preserves history',t=>{
   const f=fixture(t);let s=f.store;
   const a=approve(s,create(s,{outputs:[{name:'data',required:true}]}),true),ar=result(s,a,{data:'v1'});
