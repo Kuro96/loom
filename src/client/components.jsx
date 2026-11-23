@@ -65,12 +65,11 @@ function focusHeading(node) {
   if (node) node.focus({ preventScroll: true });
 }
 
-export function InlinePage({ title, children, onBack, busy = false, reader = false, footer }) {
+export function InlinePage({ title, children, onBack, busy = false, reader = false, actions }) {
   const titleId = useId();
   return <section className={`loom-surface loom-page${reader ? ' loom-page-reader' : ''}`} aria-labelledby={titleId}>
-    <header className="loom-panel-header"><button type="button" disabled={busy} aria-label="返回" onClick={onBack}>← 返回</button><h2 id={titleId} tabIndex={-1} ref={focusHeading}>{title}</h2></header>
+    <header className="loom-panel-header"><button type="button" disabled={busy} aria-label="返回" onClick={onBack}>← 返回</button><h2 id={titleId} tabIndex={-1} ref={focusHeading}>{title}</h2>{actions}</header>
     <div className="loom-page-body">{children}</div>
-    {footer}
   </section>;
 }
 

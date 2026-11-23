@@ -249,10 +249,10 @@ export function SettingsPanel({ settings, catalog, catalogError, reloadModels, e
     finally { setBusy(false); }
   }
   const overrides = Object.entries(roleNames).filter(([role]) => role !== 'bus' && models[role] && JSON.stringify(models[role]) !== JSON.stringify(models.bus));
-  const footer = <footer className="loom-settings-save"><button className="loom-primary" type="submit" form={formId} disabled={busy || invalidPermission}>{busy ? '保存中…' : '保存设置'}</button></footer>;
-  return <InlinePage title="设置" onBack={onClose} busy={busy} footer={footer}><form id={formId} className="loom-settings" aria-label="Loom 设置" onSubmit={save}>
+  const actions = <><button className="loom-primary loom-settings-save" type="submit" form={formId} disabled={busy || invalidPermission}>{busy ? '保存中…' : '保存设置'}</button>
+    <span className="loom-settings-status" role="status">{saved}</span></>;
+  return <InlinePage title="设置" onBack={onClose} busy={busy} actions={actions}><form id={formId} className="loom-settings" aria-label="Loom 设置" onSubmit={save}>
     <ErrorNotice error={error} /><ErrorNotice error={catalogError} onRetry={reloadModels} />
-    {saved && <p className="loom-success" role="status">{saved}</p>}
     <section className="loom-settings-section">
       <ModelPicker label="默认模型" value={models.bus} catalog={catalog} disabled={busy} onChange={value => { setModels(previous => applyDefaultModel(previous, value, catalog)); setSaved(''); }} />
       <details className="loom-advanced" aria-label="分角色模型" ref={scrollOnSettingsToggle}><summary>分角色模型{overrides.length > 0 ? ` · 已单独配置：${overrides.map(([, name]) => name).join('、')}` : ''}</summary>

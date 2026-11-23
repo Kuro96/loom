@@ -145,7 +145,7 @@ button.loom-danger-text{color:var(--dsw-alias-state-error-primary)}
 .loom-session-controls select{flex:1;width:0;font-size:12px;padding:5px}
 .loom-session-controls button{font-size:12px;white-space:nowrap;padding:4px 7px}
 .loom-conversation-body{display:flex;flex:1;min-height:0;min-width:0;position:relative;overflow:hidden}
-.loom-conversation-body[inert]{visibility:hidden}
+.loom-conversation-body[hidden]{display:none}
 .loom-page{position:absolute;inset:0;display:flex;flex-direction:column;min-width:0;background:var(--loom-bg);container:loom-surface / inline-size}
 .loom-page>header>button{flex:none}
 .loom-page-body{flex:1;min-height:0;min-width:0;overflow:auto;overscroll-behavior:contain}
@@ -202,7 +202,8 @@ button.loom-danger-text{color:var(--dsw-alias-state-error-primary)}
 .loom-page-body>form>footer{background:var(--loom-bg)}
 .loom-settings{min-width:0;margin:0 auto;width:100%}
 .loom-page-body:has(>.loom-settings){scroll-padding-block:6px;scrollbar-gutter:stable}
-.loom-page>.loom-settings-save{flex:none;margin:0;padding:8px clamp(12px,4cqi,20px);background:var(--loom-bg)}
+.loom-settings-save{white-space:nowrap}
+.loom-settings-status{min-width:0;overflow-wrap:anywhere;font-size:12px;color:var(--loom-muted)}
 .loom-settings-section{padding:16px 0;border-bottom:1px solid var(--loom-border)}
 .loom-settings-section:last-child{border-bottom:0}
 .loom-settings-section>h3{margin:0 0 12px}
@@ -220,7 +221,7 @@ input.loom-setting-control[type=checkbox]{flex:none;width:16px;height:16px;align
 .loom-detail .loom-advanced,.loom-surface .loom-advanced{border:0;padding:0;margin:12px 0}
 .loom-advanced>summary{color:var(--loom-muted);font-size:12px}
 .loom-advanced[open]>summary{margin-bottom:12px}
-.loom-advanced .loom-setting-row{border-bottom:1px solid var(--loom-border)}
+.loom-advanced>.loom-setting-row+.loom-setting-row{border-top:1px solid var(--loom-border)}
 .loom-usage{min-width:0;overflow-wrap:anywhere;--loom-usage-input:var(--dsw-alias-state-business-tertiary);--loom-usage-hit:var(--dsw-alias-state-business-primary);--loom-usage-output:var(--dsw-alias-state-success-primary)}
 .loom-usage-heading,.loom-usage-legend{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px}
 .loom-usage-heading{justify-content:space-between}

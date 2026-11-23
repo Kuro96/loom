@@ -10,13 +10,13 @@ export async function deadline(promise,label,ms=5000) {
   try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(`timeout: ${label}`)),ms);})]);}
   finally{clearTimeout(timer);}
 }
-export async function startupHost(respond=(_wire,_req,res)=>{res.writeHead(418);res.end('startup transport probe');}) {
+export async function startupHost(respond=(_wire,_req,res)=>{res.writeHead(418);res.end('startup transport probe');}, modelOptions={}) {
   const host=await nativeHost(),received=[];
   const server=createServer(async(req,res)=>{let body='';for await(const part of req)body+=part;const wire=JSON.parse(body);received.push(wire);await respond(wire,req,res);});
   server.listen(0,'127.0.0.1');await once(server,'listening');
   const add=async(name,config={})=>{const mod=native(name);return deadline(host.root.plugin(mod.default??mod,config).await(),`load ${name}`);};
   try {
-    await add('dsh-llm-pi-ai',{providers:{'loom-test-provider':{api:'openai-completions',baseURL:`http://127.0.0.1:${server.address().port}/v1`,headers:{authorization:'Bearer local-startup'},models:[{id:testModel.model}],retryPolicy:{mode:'normal',maxRetries:0}}}});
+    await add('dsh-llm-pi-ai',{providers:{'loom-test-provider':{api:'openai-completions',baseURL:`http://127.0.0.1:${server.address().port}/v1`,headers:{authorization:'Bearer local-startup'},models:[{id:testModel.model,...modelOptions}],retryPolicy:{mode:'normal',maxRetries:0}}}});
     await add('dsh-agent-default-model',testModel);
     await add('dsh-session-query');await add('dsh-session-title',{fallbackMaxWords:8,fallbackMaxBytes:96,maxTitleBytes:120});
     await add('dsh-credentials-local',{dshHome:host.directory,path:join(host.directory,'credentials'),watch:false});

@@ -76,7 +76,8 @@ test('legacy usage shows one historical coverage notice while totals and calls s
   const coverage='历史用量覆盖不全；逐轮采集从启用后开始。';
   function assertCoverage() {
     assert.equal(text().split(coverage).length-1,1);
-    assert.deepEqual(view.root.findAllByProps({role:'status'}).map(node=>node.children.join('')),[coverage]);
+    const usage=view.root.findByProps({className:'loom-settings-section loom-usage'});
+    assert.deepEqual(usage.findAllByProps({role:'status'}).map(node=>node.children.join('')),[coverage]);
     assert.equal(view.root.findAllByProps({role:'alert'}).length,0);
     assert.equal(view.root.findAllByType('button').filter(node=>node.children.join('')==='重试').length,0);
   }

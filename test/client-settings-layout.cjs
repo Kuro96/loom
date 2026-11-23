@@ -17,13 +17,13 @@ async function run() {
       import { SettingsPanel } from './src/client/panels.jsx';
       const base = {provider:'fixture', model:'one', reasoningEffort:'high'};
       const catalog = {default:base, groups:[{id:'fixture', name:'Fixture', models:[
-        {id:'one', name:'First', reasoning:{efforts:[{id:'high', name:'High'}]}}, {id:'two', name:'Second'}]}]};
+        {id:'one', name:'First', reasoning:{efforts:[{id:'high', name:'High'},{id:'low', name:'Low'}]}}, {id:'two', name:'Second'}]}]};
       let saved = {version:1, roleModels:{bus:base, review:base, worker:base, acceptance:base}, permissionPreset:null, context:{debug:false}};
       const values = {permissions:{defaultOptions:[{value:'workspace-write', name:'Workspace write'}]}, usage:{items:[]}};
       const api = {rpc:async method => method==='snapshot' ? {settings:saved} : values[method]};
       const execute = async input => {
         window.commands.push(input);
-        saved = {...saved, version:saved.version+1, permissionPreset:input.permissionPreset};
+        saved = {...saved, version:saved.version+1, permissionPreset:input.permissionPreset, roleModels:{...saved.roleModels,...input.roleModels}};
       };
       window.commands = [];
       const status = {context:{status:'idle'}, engine:{ready:true}};
@@ -33,7 +33,7 @@ async function run() {
   });
   const html = `<!doctype html><meta charset="utf-8"><style>${styles}
     body{margin:0;font-family:sans-serif} #outer{height:460px;overflow:auto}
-    .loom-root{position:relative;width:304px;height:320px;--dsw-font-family:sans-serif}
+    .loom-root{position:relative;width:304px;height:320px;--dsw-font-family:sans-serif;--dsw-alias-border-l2:#ddd}
   </style><div id="outer"><div style="height:100px"></div><div class="loom-root"></div><div style="height:500px"></div></div>`;
   const win = new BrowserWindow({ show: false, width: 580, height: 580, webPreferences: { backgroundThrottling: false, partition: 'loom-settings-layout' } });
   await win.loadURL(`data:text/html,${encodeURIComponent(html)}`);
@@ -69,6 +69,14 @@ async function run() {
     draft.dispatchEvent(new Event('change', {bubbles:true}));
     outer.scrollTop = 40;
   `);
+  const placement = await page(`(() => {
+    const title=document.querySelector('.loom-page h2'), header=title.parentElement;
+    const button=box(save), heading=box(title);
+    return {inHeader:header.contains(save), nearTitle:button.left>=heading.right&&button.left-heading.right<=24,
+      aboveBody:button.bottom<=box(bodyScroll).top,
+      hit:document.elementFromPoint((button.left+button.right)/2,(button.top+button.bottom)/2)===save};
+  })()`);
+  assert.deepEqual(placement, { inHeader:true, nearTitle:true, aboveBody:true, hit:true }, 'save must be visible beside the settings title without scrolling');
   const reveal = await page(`(() => {
     roles.firstElementChild.focus({preventScroll:true});
     const gap = box(bodyScroll).bottom - box(roles.firstElementChild).bottom;
@@ -84,8 +92,12 @@ async function run() {
   assert.equal(opened.outer, reveal.outer);
   assert.deepEqual(opened.save, reveal.save);
   assert.ok(opened.top > reveal.top && opened.body.bottom - opened.first.bottom <= 10, 'opening scrolls only enough to reveal the first control');
+  assert.deepEqual(await page(`[...roles.querySelectorAll('.loom-setting-row')].map(row=>{const s=getComputedStyle(row);return [s.borderTopWidth,s.borderBottomWidth]})`),
+    [['0px','0px'],['1px','0px'],['1px','0px'],['1px','0px']], 'row borders separate siblings, not models from permissions');
+  assert.equal(await page('getComputedStyle(roles.parentElement).borderBottomWidth'), '1px');
   await press('Tab', 9);
   assert.equal(await page('document.activeElement.getAttribute("aria-label")'), '协调');
+  await page(`{ const effort=document.querySelector('[aria-label="结果预验收推理强度"]'); effort.value='low'; effort.dispatchEvent(new Event('change',{bubbles:true})); }`);
 
   await page('roles.firstElementChild.focus();');
   await press('Enter', 13, '\r');
@@ -106,17 +118,17 @@ async function run() {
   assert.equal(diagnostics.outer, below.outer);
   assert.deepEqual(diagnostics.save, below.save);
   assert.equal(diagnostics.draft, 'workspace-write');
-  assert.ok(diagnostics.save.top >= diagnostics.body.bottom, 'save occupies separate space below the scrollport');
+  assert.ok(diagnostics.save.bottom <= diagnostics.body.top, 'save stays above the scrollport');
   const end = await page(`(() => {
     bodyScroll.scrollTop = bodyScroll.scrollHeight;
     const tail = window.tail = [...debug.querySelectorAll('summary')].at(-1);
     const rect = box(tail);
-    return {tail:rect, body:box(bodyScroll), save:box(save), top:bodyScroll.scrollTop,
+    return {tail:rect, body:box(bodyScroll), top:bodyScroll.scrollTop,
       hit:document.elementFromPoint(rect.left+8,(rect.top+rect.bottom)/2)===tail,
       horizontal:bodyScroll.scrollWidth>bodyScroll.clientWidth};
   })()`);
-  assert.ok(end.tail.bottom <= end.body.bottom && end.tail.bottom <= end.save.top && end.hit && !end.horizontal,
-    `final diagnostics control must be reachable above save: ${JSON.stringify(end)}`);
+  assert.ok(end.tail.bottom <= end.body.bottom && end.hit && !end.horizontal,
+    `final diagnostics control must be reachable: ${JSON.stringify(end)}`);
   await page('tail.focus({preventScroll:true});');
   await press('Enter', 13, '\r');
   assert.deepEqual(await page('({open:tail.parentElement.open, top:bodyScroll.scrollTop})'), { open: true, top: end.top },
@@ -124,8 +136,11 @@ async function run() {
   assert.equal(await page('commands.length'), 0);
   await page('save.focus({preventScroll:true});');
   await press('Enter', 13, '\r');
-  assert.deepEqual(await page('commands'), [{ type: 'settings.update', expectedVersion: 1, roleModels: {}, permissionPreset: 'workspace-write' }]);
-  assert.equal(await page('document.querySelector(".loom-success").textContent'), '设置已保存。');
+  assert.deepEqual(await page('commands'), [{ type: 'settings.update', expectedVersion: 1,
+    roleModels: { acceptance: { provider: 'fixture', model: 'one', reasoningEffort: 'low' } }, permissionPreset: 'workspace-write' }]);
+  assert.equal(await page('document.querySelector(".loom-page header [role=status]").textContent'), '设置已保存。');
+  assert.equal(await page(`document.querySelector('[aria-label="结果预验收推理强度"]').value`), 'low');
+  assert.equal(await page(`document.querySelector('[aria-label="协调推理强度"]').value`), 'high');
 }
 
 setTimeout(() => { console.error('Settings layout test timed out'); app.exit(1); }, 15000).unref();

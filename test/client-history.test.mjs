@@ -599,9 +599,11 @@ test('settings occupies the main pane and returning preserves the work tab and c
   assert.equal(root.findAllByType('dialog').length, 0, 'settings belongs in the main pane');
   assert.equal(root.findByProps({ className: 'loom-split' }).props['data-mobile-pane'], 'page');
   assert.equal(root.findByProps({ className: 'loom-conversation-body' }).props.inert, true);
+  assert.equal(root.findByProps({ className: 'loom-conversation-body' }).props.hidden, true, 'hide the entire native composer while settings owns the pane');
   assert.ok(root.findByProps({ className: 'loom-chat' }).findByProps({ 'aria-label': 'Loom 设置' }));
   await act(async () => view.button('返回').props.onClick());
   assert.equal(root.findByProps({ className: 'loom-split' }).props['data-mobile-pane'], 'chat');
+  assert.equal(root.findByProps({ className: 'loom-conversation-body' }).props.hidden, false);
   await act(async () => root.findByProps({ 'data-work-id': work.id }).props.onClick());
   await act(async () => view.button('报告').props.onClick());
   await act(async () => view.button('设置').props.onClick());
