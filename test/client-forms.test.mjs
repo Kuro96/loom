@@ -52,6 +52,45 @@ function database(t) {
   return store;
 }
 
+test('existing sessions load on demand and a listing error does not interrupt work creation', async t => {
+  const store = database(t);
+  const session = { workspaceId: workspaces[0].workspaceId, sessionId: 'existing-session', title: '既有会话' };
+  const failure = Object.assign(new Error('session artifact uses .jsonl, but this backend is configured for compression "zstd"'), { code: 'SESSION_QUERY_PERSISTENCE_FAILED' });
+  const calls = [], commands = [];
+  let created, closed = 0;
+  const view = await mount(t, forms.CreateWork, { workspaceId: workspaces[0].workspaceId, workspaces, catalog, defaultModel: model,
+    api: { rpc: async method => {
+      if (method !== 'nativeSessions') return { presets: [], defaultOptions: [] };
+      calls.push(method);
+      if (calls.length === 1) throw failure;
+      return [session, { ...session, workspaceId: 'other-project', sessionId: 'other-session' }];
+    } },
+    execute: command => { commands.push(command); return store.command(command, { kind: 'user' }); },
+    onCreated(work) { created = work; }, onClose() { closed++; },
+  });
+  assert.equal(calls.length, 0);
+  await view.change('工作标题', '核对资料');
+  const advanced = view.renderer.root.findAllByType('details').find(node => text(node.children[0]) === '范围、检查与关联会话');
+  await act(async () => advanced.props.onToggle({ currentTarget: { open: true } }));
+  assert.equal(calls.length, 1);
+  assert.match(text(view.renderer.root.findByProps({ role: 'alert' }).findByType('p')), /已有会话.*仍可创建独立工作/);
+  assert.equal(view.label('关联已有会话').props.value, '');
+  assert.equal(view.button('创建工作').props.disabled, false);
+  await view.submit();
+  assert.equal(closed, 1);
+  assert.equal(created.title, '核对资料');
+  assert.equal(Object.hasOwn(commands[0], 'sessionId'), false);
+
+  await act(async () => view.button('重试').props.onClick());
+  assert.equal(calls.length, 2);
+  assert.deepEqual(view.label('关联已有会话').findAllByType('option').map(option => option.props.value), ['', 'existing-session']);
+  assert.equal(view.renderer.root.findAllByProps({ role: 'alert' }).length, 0);
+  await view.change('工作标题', '沿用已有会话');
+  await view.change('关联已有会话', 'existing-session');
+  await view.submit();
+  assert.equal(commands[1].sessionId, 'existing-session');
+});
+
 test('reusing a template preserves scalar types and identifies the missing input field before save', async t => {
   const store = database(t), user = { kind: 'user' };
   const workflow = store.command({ type: 'workflow.create', workspaceId: 'workspace-uuid', title: '筛选资料',

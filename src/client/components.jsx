@@ -15,9 +15,9 @@ export function Field({ label, hint, children }) {
 
 export function Empty({ children }) { return <div className="loom-empty">{children}</div>; }
 
-export function ErrorNotice({ error, onRetry, onDismiss }) {
+export function ErrorNotice({ error, message: summary, onRetry, onDismiss }) {
   if (!error) return null;
-  const message = { CONFLICT: '内容已更新，请刷新后重试。', NOT_FOUND: '内容暂不可用，请刷新后重试。', INVALID_INPUT: '请检查填写内容后重试。', FORBIDDEN: '此操作需要授权。', INVALID_STATE: '当前状态暂时无法执行此操作。' }[error.code] || '操作未完成，请重试或查看技术详情。';
+  const message = summary ?? ({ CONFLICT: '内容已更新，请刷新后重试。', NOT_FOUND: '内容暂不可用，请刷新后重试。', INVALID_INPUT: '请检查填写内容后重试。', FORBIDDEN: '此操作需要授权。', INVALID_STATE: '当前状态暂时无法执行此操作。' }[error.code] || '操作未完成，请重试或查看技术详情。');
   return <div className="loom-error" role="alert"><p>{message}</p>
     <details className="loom-advanced"><summary>技术详情</summary><pre>{typeof error === 'string' ? error : errorText(error)}</pre></details>
     <div className="loom-actions">{onRetry && <button type="button" onClick={onRetry}>重试</button>}{onDismiss && <button type="button" onClick={onDismiss}>关闭提示</button>}</div>
