@@ -32,7 +32,7 @@ export function definitionFromWorks(works) {
   }));
   return { title: works.length === 1 ? works[0].title : '工作组合', description: '', knowledge: works[0].definitionSnapshot?.knowledge ?? '', parameters, stages };
 }
-export function DefinitionEditor({ value, onChange, ChecksEditor }) {
+export function DefinitionEditor({ value, onChange, ChecksEditor, guided = false }) {
   const { stages, parameters } = value;
   const update = patch => onChange({ ...value, ...patch });
   const updateStage = (index, patch) => update({ stages: stages.map((stage, i) => i === index ? { ...stage, ...patch } : stage) });
@@ -66,12 +66,12 @@ export function DefinitionEditor({ value, onChange, ChecksEditor }) {
           updateStage(index, { inputs: Object.fromEntries(inputs.map((entry, i) => i === at ? [name, ref] : entry)) });
         }
         const previous = stages.filter(item => item.id !== stage.id);
-        return <section className="loom-stage" key={stage.id}><header><strong>步骤 {number}</strong><button type="button" aria-label={`删除步骤 ${number}`} onClick={() => removeStage(stage.id)}>删除步骤</button></header>
+        return <section className="loom-stage" key={stage.id}><header><strong>步骤 {number}</strong>{!guided && <button type="button" aria-label={`删除步骤 ${number}`} onClick={() => removeStage(stage.id)}>删除步骤</button>}</header>
           <Field label="步骤名称"><input aria-label={`步骤名称 ${number}`} required value={stage.title} onChange={event => updateStage(index, { title: event.target.value })} /></Field>
           <Field label="工作说明与完成条件"><textarea aria-label={`步骤说明 ${number}`} rows={3} value={stage.instructions} onChange={event => updateStage(index, { instructions: event.target.value })} /></Field>
           <details><summary>设置范围、依赖与检查</summary><Field label="操作范围"><input aria-label={`操作范围 ${number}`} value={stage.scope ?? ''} onChange={event => updateStage(index, { scope: event.target.value })} /></Field>
           {previous.length > 0 && <fieldset aria-label={`前置步骤 ${number}`}><legend>前置步骤</legend>{previous.map(dependency => <label className="loom-checkbox" key={dependency.id}><input type="checkbox" value={dependency.id} checked={(stage.dependsOn ?? []).includes(dependency.id)} onChange={event => updateStage(index, { dependsOn: event.target.checked ? [...(stage.dependsOn ?? []), dependency.id] : stage.dependsOn.filter(id => id !== dependency.id) })} /><span>{dependency.title || '待命名步骤'}</span></label>)}</fieldset>}
-          <label className="loom-checkbox"><input aria-label={`人工关卡 ${number}`} type="checkbox" checked={Boolean(stage.manualGate)} onChange={event => updateStage(index, { manualGate: event.target.checked })} /><span>执行前由我放行</span></label>
+          <label className="loom-checkbox"><input aria-label={`人工关卡 ${number}`} type="checkbox" checked={Boolean(stage.manualGate)} disabled={guided} onChange={event => updateStage(index, { manualGate: event.target.checked })} /><span>{guided ? '执行前人工放行（在核对草稿中修改）' : '执行前由我放行'}</span></label>
           <details><summary>输入与结果交接 · {inputs.length}</summary>{inputs.map(([name, ref], at) => {
             const label = `${number}.${at + 1}`, source = stages.find(item => item.id === ref.stageId);
             return <section className="loom-stage" key={at}><div className="loom-inline-fields"><Field label="输入名称"><input aria-label={`输入名称 ${label}`} required value={name} onChange={event => input(at, event.target.value, ref)} /></Field>
@@ -80,7 +80,7 @@ export function DefinitionEditor({ value, onChange, ChecksEditor }) {
               {ref.kind === 'parameter' && <Field label="输入参数"><select aria-label={`输入参数 ${label}`} value={ref.path[0] ?? ''} onChange={event => input(at, name, { ...ref, path: [event.target.value, ...ref.path.slice(1)] })}><option value="">选择参数</option>{parameters.map((p, i) => <option key={i} value={p.name}>{p.description || p.name}</option>)}</select></Field>}
               {ref.kind === 'output' && <div className="loom-inline-fields"><Field label="来源步骤"><select aria-label={`来源步骤 ${label}`} value={ref.stageId} onChange={event => input(at, name, { ...ref, stageId: event.target.value, output: '' })}><option value="">选择步骤</option>{previous.map(s => <option key={s.id} value={s.id}>{s.title || '待命名步骤'}</option>)}</select></Field>
                 <Field label="来源输出"><select aria-label={`来源输出 ${label}`} value={ref.output} onChange={event => input(at, name, { ...ref, output: event.target.value })}><option value="">选择输出</option>{(source?.outputs ?? []).map(o => <option key={o.name} value={o.name}>{o.description || o.name}</option>)}</select></Field></div>}
-              {ref.kind !== 'value' && <Field label="字段路径（可选，用点分隔）"><input aria-label={`字段路径 ${label}`} value={(ref.kind === 'parameter' ? ref.path.slice(1) : ref.path).join('.')} onChange={event => input(at, name, { ...ref, path: [...(ref.kind === 'parameter' ? ref.path.slice(0, 1) : []), ...(event.target.value ? event.target.value.split('.') : [])] })} /></Field>}
+              {ref.kind !== 'value' && !(guided && ref.kind === 'output') && <Field label="字段路径（可选，用点分隔）"><input aria-label={`字段路径 ${label}`} value={(ref.kind === 'parameter' ? ref.path.slice(1) : ref.path).join('.')} onChange={event => input(at, name, { ...ref, path: [...(ref.kind === 'parameter' ? ref.path.slice(0, 1) : []), ...(event.target.value ? event.target.value.split('.') : [])] })} /></Field>}
               <button type="button" onClick={() => updateStage(index, { inputs: Object.fromEntries(inputs.filter((_, i) => i !== at)) })}>删除输入 {label}</button>
             </section>;
           })}<button type="button" onClick={() => {
@@ -95,7 +95,7 @@ export function DefinitionEditor({ value, onChange, ChecksEditor }) {
           <details><summary>完成检查 · {stage.checks.length}</summary><ChecksEditor checks={stage.checks} onChange={checks => updateStage(index, { checks })} /></details></details>
         </section>;
       })}
-      <button type="button" onClick={() => update({ stages: [...stages, { id: crypto.randomUUID(), title: '', instructions: '', scope: '', dependsOn: [], manualGate: false, checks: [], inputs: {}, outputs: [] }] })}>添加步骤</button>
+      {!guided && <button type="button" onClick={() => update({ stages: [...stages, { id: crypto.randomUUID(), title: '', instructions: '', scope: '', dependsOn: [], manualGate: false, checks: [], inputs: {}, outputs: [] }] })}>添加步骤</button>}
     </section>
     <details><summary>工作流知识</summary><Field label="共享方法与约束"><textarea aria-label="工作流知识" rows={4} value={value.knowledge} onChange={event => update({ knowledge: event.target.value })} /></Field></details>
   </>;

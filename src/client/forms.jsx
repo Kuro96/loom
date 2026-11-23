@@ -82,16 +82,20 @@ export function CreateWork({ workspaceId, workspaces, catalog, defaultModel, def
   </form></InlinePage>;
 }
 
-export function CreateWorkflow({ workspaceId, workspaces, execute, onClose, onCreated, onProposed, api, catalog, defaultModel, defaultPermission = null, workflow = null, proposal = null, initialDefinition = null, sourceWorks = [] }) {
+export function CreateWorkflow({ workspaceId, workspaces, execute, onClose, onCreated, onProposed, api, catalog, defaultModel, defaultPermission = null, workflow = null, proposal = null, initialDefinition = null, sourceWorks = [], manualDraft = false }) {
   const [commandFor] = useState(createCommandMemo);
   const [startFor] = useState(createCommandMemo);
   const [workspace, setWorkspace] = useState(proposal?.workspaceId ?? workflow?.workspaceId ?? workspaceId);
-  const [definition, setDefinition] = useState(() => definitionFields(proposal?.definitionSnapshot ?? workflow ?? initialDefinition ?? { title: '', stages: [] }));
+  const [localDefinition, setLocalDefinition] = useState(() => definitionFields(proposal?.definitionSnapshot ?? workflow ?? initialDefinition ?? { title: '', stages: [] }));
+  const definition = manualDraft ? manualDraft.definition : localDefinition;
+  const setDefinition = manualDraft ? manualDraft.onChange : setLocalDefinition;
   const [parameters, setParameters] = useState(() => parameterDrafts(definition, proposal?.parameters));
   const [execution, setExecution] = useState(proposal?.execution ?? { model: defaultModel, permissionPreset: defaultPermission, autoAccept: false });
-  const form = useSubmit(async mode => {
+  const form = useSubmit(async submittedMode => {
+    const mode = manualDraft ? 'save' : submittedMode;
     if (!workspace) throw new Error('请选择所属项目');
-    const clean = cleanDefinition(definition);
+    const parsed = cleanDefinition(definition);
+    const clean = manualDraft ? manualDraft.finalize(parsed) : parsed;
     if (proposal) {
       const result = await execute(commandFor({ type: 'use.update', useId: proposal.id, expectedVersion: proposal.version, definition: clean, parameters: parameterValues(clean, parameters), ...execution }));
       onProposed(await api.readUse(result.id)); return;
@@ -110,17 +114,18 @@ export function CreateWorkflow({ workspaceId, workspaces, execute, onClose, onCr
     if (mode === 'save-run') {
       const result = await execute(startFor({ type: 'workflow.start', workflowId: flow.id, expectedVersion: flow.version, ...fields }));
       onProposed(await api.readUse(result.use.id));
-    } else { onCreated(flow); onClose(); }
+    } else { onCreated(flow); onClose(true); }
   });
   const disabled = form.busy || !workspace || !definition.title.trim() || !definition.stages.length;
-  return <InlinePage title={proposal ? '修改本次说明' : workflow ? '编辑工作流模板' : sourceWorks.length ? '保存为工作流' : '新建工作流'} onBack={onClose} busy={form.busy}><form onSubmit={form.submit}>
+
+  return <InlinePage title={manualDraft ? '从手册创建 · 编辑模板' : proposal ? '修改本次说明' : workflow ? '编辑工作流模板' : sourceWorks.length ? '保存为工作流' : '新建工作流'} onBack={() => onClose()} busy={form.busy}><form onSubmit={form.submit}>
     <FormError error={form.error} />
-    <Field label="所属项目 *"><WorkspacePicker workspaces={workspaces} value={workspace} onChange={setWorkspace} disabled={Boolean(proposal || workflow || sourceWorks.length)} /></Field>
+    <Field label="所属项目 *"><WorkspacePicker workspaces={workspaces} value={workspace} onChange={setWorkspace} disabled={Boolean(manualDraft || proposal || workflow || sourceWorks.length)} /></Field>
     {workflow && <p className="loom-hint">当前版本 {workflow.version} · 保存后用于后续使用</p>}
     {sourceWorks.length > 0 && <p className="loom-hint">来源：{sourceWorks.map(work => work.title).join('、')}</p>}
-    <DefinitionEditor value={definition} onChange={setDefinition} ChecksEditor={ChecksEditor} />
+    <DefinitionEditor value={definition} onChange={setDefinition} ChecksEditor={ChecksEditor} guided={Boolean(manualDraft)} />
     {!workflow && onProposed && <>{definition.parameters.length > 0 && <UseInputFields definition={definition} values={parameters} onChange={setParameters} />}<ExecutionEditor api={api} catalog={catalog} value={execution} onChange={setExecution} /></>}
-    <footer><button type="submit" value="save" disabled={disabled}>{proposal ? '保存本次说明' : workflow ? '保存新版本' : sourceWorks.length ? '保存工作流' : '创建工作流'}</button>
+    <footer><button type="submit" value="save" disabled={disabled}>{manualDraft ? '保存模板' : proposal ? '保存本次说明' : workflow ? '保存新版本' : sourceWorks.length ? '保存工作流' : '创建工作流'}</button>
       {!proposal && !workflow && onProposed && <><button type="submit" value="once" disabled={disabled || !execution.model}>执行一次</button><button type="submit" value="save-run" className="loom-primary" disabled={disabled || !execution.model}>保存为工作流并执行</button></>}
     </footer>
   </form></InlinePage>;

@@ -4,6 +4,7 @@ import { LoomStore } from './core/store.mjs';
 import { LoomEngine } from './host/engine.mjs';
 import {createWorkerBinder} from './host/worker.mjs';
 import {previewTarget} from './host/report-preview.mjs';
+import {draftFromManual, generateManualDraft} from './host/manual-workflow.mjs';
 import { createLoomContext } from './context/index.mjs';
 import {loomDirectory} from './bootstrap.mjs';
 
@@ -65,6 +66,11 @@ async function initialize(ctx,config,bindingReady,directory,controlPath) {
     query:payload=>store.query(payload),
     checkDeletion:payload=>store.checkDeletion(payload),
     preview:payload=>previewTarget(store,controlPath,ctx.workspaceRegistry,payload),
+    manualDraft:(payload, signal)=>draftFromManual({
+      workspace:typeof payload.workspaceId==='string' && payload.workspaceId!==workspace.workspaceId ? ctx.workspaceRegistry.get(payload.workspaceId) : null,
+      store, request:payload,
+      generate:async evidence=>generateManualDraft(ctx,store.getSettings().roleModels.bus ?? (await engine.native.modelCatalog()).default,evidence,AbortSignal.any([signal,AbortSignal.timeout(90000)])),
+    }),
     command:payload=>engine.command(payload,{kind:'user'}),
     models:()=>engine.native.modelCatalog(),
     permissions:()=>ctx.permissionPresets.catalog(),
@@ -82,7 +88,7 @@ async function initialize(ctx,config,bindingReady,directory,controlPath) {
       const respond=result=>Response.json({type:'server-response',rpcId:envelope.rpcId,result});
       const payload=envelope.payload;
       if(payload===null || typeof payload!=='object' || Array.isArray(payload)) return respond({ok:false,error:{code:'INVALID',message:'请求参数必须为对象',details:{}}});
-      try {return respond({ok:true,value:await handler(payload)});}
+      try {return respond({ok:true,value:await handler(payload,request.signal)});}
       catch(error) {
         ctx.logger.error(error);
         return respond({ok:false,error:{code:error.code ?? 'LOOM_ERROR',message:error.message,details:error.code==='INVALID_DEPENDENCY' && error.details?.references ? {references:error.details.references} : {}}});

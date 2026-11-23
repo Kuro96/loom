@@ -26,7 +26,7 @@ function StageValue({ definition, parameters, refValue: ref }) {
   const value = ref.path.slice(1).reduce((v, key) => v?.[key], parameters ? parameters[ref.path[0]] : param?.default);
   return value === undefined ? (parameters ? '未填写' : '使用时填写') : <>{!parameters && '默认：'}<ValueDisplay value={value} /></>;
 }
-export function DefinitionSummary({ definition, parameters = null }) {
+export function DefinitionSummary({ definition, parameters = null, reviewStage = null }) {
   const confirming = parameters !== null, bound = new Set(), notes = [];
   const stages = definition.stages;
   const sharedScope = confirming && stages[0]?.scope && stages.every(stage => stage.scope === stages[0].scope) ? stages[0].scope : null;
@@ -42,15 +42,16 @@ export function DefinitionSummary({ definition, parameters = null }) {
     }
     const checks = stage.checks ?? [], requires = splitRequirements(stage.instructions).requirements;
     const prerequisites = stage.dependsOn?.length > 0 && <p>前置工作：{stage.dependsOn.map(id => stages.find(s => s.id === id)?.title ?? '来源工作').join('、')}</p>;
-    if (secondary.length || !confirming && (requires || prerequisites || stage.scope || checks.length)) notes.push(<section key={stage.id}><h4>{stage.title}</h4>
+    if (secondary.length || !confirming && !reviewStage && (requires || prerequisites || stage.scope || checks.length)) notes.push(<section key={stage.id}><h4>{stage.title}</h4>
       {!confirming && requires && <p className="loom-description">{requires}</p>}{secondary.length > 0 && <dl className="loom-summary">{secondary}</dl>}
       {!confirming && <>{prerequisites}{stage.scope && <p>操作范围：{stage.scope}</p>}<CheckSummary checks={checks} /></>}
     </section>);
-    return <li key={stage.id}><strong>{stage.title}</strong>{stage.manualGate && <span className="loom-hint"> · 需要放行</span>}
-      {confirming && requires && <p className="loom-description">{requires}</p>}
+    return <li key={stage.id}><strong>{stage.title}</strong>{!reviewStage && stage.manualGate && <span className="loom-hint"> · 需要放行</span>}
+      {(confirming || reviewStage) && requires && <p className="loom-description">{requires}</p>}
       {primary.length > 0 && <dl className="loom-summary">{primary}</dl>}
       {confirming && <>{stage.outputs.length > 0 ? <p>产出：{stage.outputs.map(output => (output.description || output.name) + (output.required ? '（必需）' : '')).join('、')}</p> : !checks.length && <p className="loom-hint">本项未单列产出或检查条件。</p>}
         {prerequisites}{stage.scope && !sharedScope && <p>操作范围：{stage.scope}</p>}<CheckSummary checks={checks} /></>}
+      {reviewStage && <>{prerequisites}<CheckSummary checks={checks} />{reviewStage(stage)}</>}
     </li>;
   });
   const unused = (definition.parameters ?? []).filter(p => !bound.has(p.name));
