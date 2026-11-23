@@ -173,8 +173,8 @@ export class LoomStore {
       run.prompt+='\n使用loom_report提交具名结果（kind=result）、外部等待（kind=wait）或回执不确定（kind=uncertain）。报告为候选，检查和验收由Host完成。';
       run.prompt+='\n请在同一次 loom_report 中提交你实际撰写的 document:{english,chinese} Markdown 正文，summary 保留简短摘要。优先使用可用且适用的报告技能。先用简短英文写明结论、证据、未决事项或所需决定，术语一致；再忠实翻译为自然中文，保留数字、条件和不确定性。';
       run.prompt+='\n完成工作即使没有文件或声明输出也须提交双语正文。outputs 保存声明的交接值，无声明时为 {}。deliverables:[{title,path}] 仅列本次实际直接交给用户的文件，path 使用项目内相对路径；无交付文件时省略或填 []。';
-      run.prompt+='\n遇到外部等待，先核对项目记录、已有交接和原操作回执。已有查询路径时安排下一次只读核对，写明来源、方法、完成条件和时间。只有现有来源无法补齐关键事实时，才记录已查来源与需要用户给出的具体信息。';
-      if(work.wait) run.prompt+=`\n恢复操作须先核原操作状态，继续同一operationId；已有远端引用与等待条件：${JSON.stringify(work.wait)}`;
+      run.prompt+='\n外部等待请记录原操作引用、完成条件及下次核对时间。缺少线索时，在报告中注明已查来源和缺口，交给总控查找相关项目记录。';
+      if(work.wait) run.prompt+=`\n恢复操作须先核原操作状态，继续同一operationId；总控交接和用户补充是核对线索，不是变更范围或重复提交的授权。\n现有外部操作记录：${JSON.stringify(work.wait)}`;
       this.#put('run',run); this.#event('run.reserved',run,{kind:'host'},{runId:run.id,requestId:run.requestId});
       return run;
     });
@@ -338,7 +338,7 @@ export class LoomStore {
       this.#event('run.reported',run,{kind:'host'},{runId,callId:source.callId,kind:report.kind});return candidate;
     });
   }
-  settleReport(runId,{callId,eventCursor}) {
+  settleReport(runId,{callId,eventCursor,coordinate=false}) {
     text(callId,'报告调用ID');requireValue(Number.isSafeInteger(eventCursor) && eventCursor>=-1,'事件游标格式错误');
     return this.#transaction(()=>{
       const run=this.#required('run',runId),hash=fingerprint({callId,eventCursor});
@@ -350,14 +350,38 @@ export class LoomStore {
       if(report.document) this.#appendDocument(work,run.id,'worker','执行报告',report.document);
       const followUp=report.kind==='uncertain'?report.uncertainty.followUp:undefined;
       const scheduled=report.kind==='wait' || followUp!==undefined;
-      run.status=scheduled?'waiting':'uncertain';work.status=scheduled?'waiting':'paused';
+      run.status=scheduled?'waiting':'uncertain';work.status=scheduled || coordinate?'waiting':'paused';
       if(followUp) {
         const {operationId,remoteRef,reason}=report.uncertainty;
         work.wait={operationId,remoteRef,condition:reason,...followUp};
-      } else work.wait=report.kind==='wait'?report.wait:report.uncertainty;
+      } else if(coordinate && !scheduled) {
+        const {missingInformation,...reference}=report.uncertainty;
+        work.wait={...reference,nextCheckAt:now(),...(missingInformation?{pendingInformation:missingInformation}:{})};
+      }
+      else work.wait=report.kind==='wait'?report.wait:report.uncertainty;
       run.wait=work.wait;
       run.summary=report.summary;run.reportCallId=callId;run.cursor=Math.max(run.cursor,eventCursor);run.finishedAt=now();run.settleHash=hash;
       this.#saveWork(work);this.#put('run',run);this.#event('run.reportSettled',run,{kind:'host'},{callId,eventCursor,status:run.status});return run;
+    });
+  }
+  nextExternalWait(at=now()) {
+    const row=this.#db.prepare(`SELECT w.body FROM works w JOIN workspaces p ON p.id=w.workspaceId
+      WHERE w.status='waiting' AND json_extract(p.body,'$.active')=1
+      AND julianday(COALESCE(json_extract(w.body,'$.wait.coordination.retryAt'),json_extract(w.body,'$.wait.nextCheckAt')))<=julianday(?)
+      ORDER BY julianday(COALESCE(json_extract(w.body,'$.wait.coordination.retryAt'),json_extract(w.body,'$.wait.nextCheckAt'))),w.seq LIMIT 1`).get(at);
+    return row===undefined ? null : recordBody('work',row);
+  }
+  claimExternalWait(workId,version,at=now()) {
+    return this.#transaction(()=>{
+      const work=this.#get('work',workId);
+      if(work===null || work.status!=='waiting' || work.version!==version) return null;
+      if(zonedTime(work.wait.coordination?.retryAt??work.wait.nextCheckAt)>zonedTime(at)) return null;
+      const attempt=(work.wait.coordination?.attempt??0)+1;
+      const retryAt=new Date(zonedTime(at)+Math.min(30*60000,60000*2**Math.min(attempt-1,5))).toISOString();
+      work.wait={...work.wait,coordination:{attempt,retryAt}};
+      this.#saveWork(work);
+      this.#event('work.waitCoordination',work,{kind:'host'},{operationId:work.wait.operationId,attempt,retryAt});
+      return work;
     });
   }
   wakeWaiting(at=now(),limit=20) {
@@ -577,8 +601,8 @@ export class LoomStore {
     requireValue(input && typeof input==='object','命令格式错误');
     if(isUserCleanupCommand(input.type)) requireValue(actor.kind==='user','取消提案或删除记录须由用户提交','FORBIDDEN');
     if(input.type==='work.retryAcceptance') requireValue(actor.kind==='user','重新预验收须由用户提交','FORBIDDEN');
-    if(input.type==='work.addReport') requireValue(actor.kind==='agent' && typeof coordinatorSessionId==='string' &&
-      actor.sessionId===coordinatorSessionId,'仅当前总控会话可追加报告','FORBIDDEN');
+    if(['work.addReport','work.resolveWait'].includes(input.type)) requireValue(actor.kind==='agent' && typeof coordinatorSessionId==='string' &&
+      actor.sessionId===coordinatorSessionId,'此操作仅供当前总控会话使用','FORBIDDEN');
     actor={kind:actor.kind,...(actor.sessionId===undefined?{}:{sessionId:text(actor.sessionId,'会话ID')})};
     if(input.idempotencyKey!==undefined) text(input.idempotencyKey,'幂等键');
     return {actor,key:input.idempotencyKey,hash:fingerprint({input,actor})};
@@ -719,6 +743,33 @@ export class LoomStore {
   #execute(input, actor, busLaunch) {
     const timestamp=now();
     if(input.reviewRequired!==undefined) requireValue(typeof input.reviewRequired==='boolean','先审阅须为布尔值');
+    if(input.type==='work.resolveWait') {
+      const work=this.#required('work',input.workId);this.#version(work,input,true);
+      requireValue(work.status==='waiting' && work.wait?.coordination && work.wait.operationId===input.operationId,'外部等待已变化','CONFLICT');
+      this.#workspace(work.workspaceId);
+      const fields={continue:['information'],ask:['missingInformation'],wait:['condition','nextCheckAt','checkMethod']};
+      requireValue(Object.hasOwn(fields,input.action),'请选择继续、复查或补充信息');
+      requireValue(Object.keys(input).every(key=>['type','workId','expectedVersion','operationId','idempotencyKey','sources','action',...fields[input.action]].includes(key)),'外部等待协调参数无效');
+      requireValue(Array.isArray(input.sources) && input.sources.length>=1 && input.sources.length<=12,'请记录已查来源');
+      const sources=input.sources.map(value=>text(value,'线索来源'));
+      requireValue(sources.every(value=>Buffer.byteLength(value)<=512),'线索来源超过512字节');
+      const {coordination,nextCheckAt,missingInformation,pendingInformation,attempted,handoff,...reference}=work.wait;
+      const evidence={actor,at:timestamp,sources};
+      if(input.action==='continue') {
+        const information=text(input.information,'交接线索');requireValue(Buffer.byteLength(information)<=8192,'交接线索超过8KiB');
+        work.wait={...reference,handoff:{...evidence,information}};work.status='queued';
+      } else if(input.action==='ask') {
+        const question=text(input.missingInformation,'待补信息');requireValue(Buffer.byteLength(question)<=2048,'待补信息超过2KiB');
+        work.wait={...reference,attempted:sources.join('；'),missingInformation:question,handoff:evidence};work.status='paused';
+      } else {
+        const condition=text(input.condition,'完成条件'),checkMethod=text(input.checkMethod,'核对方法');
+        const due=zonedTime(input.nextCheckAt),current=Date.now();
+        requireValue(due>current && due-current<=30*24*60*60*1000,'恢复时间须在未来30天内');
+        requireValue(Buffer.byteLength(condition)+Buffer.byteLength(checkMethod)<=4096,'复查说明超过4KiB');
+        work.wait={...reference,condition,checkMethod,nextCheckAt:input.nextCheckAt,handoff:evidence};
+      }
+      return this.#saveWork(work);
+    }
     if(input.type==='work.addReport') {
       bounded(input);
       requireValue(Object.keys(input).every(k=>['type','workId','runId','expectedVersion','idempotencyKey','title','document'].includes(k)),'补充报告格式错误');
@@ -988,7 +1039,11 @@ export class LoomStore {
         const {missingInformation,...reference}=work.wait;
         work.wait={...reference,information};
       } else requireValue(input.information===undefined,'当前工作没有待补信息');
-      work.status=work.modelConsent?'queued':'awaiting_model';
+      if(work.wait?.nextCheckAt && work.wait.information===undefined) {
+        const {coordination,...reference}=work.wait;
+        work.wait=reference;
+        work.status='waiting';
+      } else work.status=work.modelConsent?'queued':'awaiting_model';
       return this.#saveWork(work);
     }
     if(input.type==='work.steer') {

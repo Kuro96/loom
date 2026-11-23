@@ -213,6 +213,26 @@ test('external wait settles only on Host acknowledgement then wakes same operati
   assert.notEqual(resumed.requestId,run.requestId);assert.deepEqual(resumed.wait,report.wait);assert.ok(resumed.prompt.includes('platform/job-1'));assert.ok(resumed.prompt.includes('先核'));
 });
 
+test('resumed coordination preserves its schedule and ignores stale wait decisions across reopen',t=>{
+  const f=fixture(t);let s=f.store;
+  const w=approve(s,create(s)),run=s.reserveRun(w.id),report=waitReport(w),at=report.wait.nextCheckAt;
+  s.reportRun(run.id,report,source(run));s.settleReport(run.id,{callId:'report',eventCursor:5,coordinate:true});
+  const waiting=s.nextExternalWait(at),claim=s.claimExternalWait(w.id,waiting.version,at);
+  const resolution={type:'work.resolveWait',workId:w.id,expectedVersion:claim.version,operationId:w.id,action:'continue',sources:['Project ledger'],information:'Check Bin-B9'};
+  s=f.reopen();assert.equal(s.nextExternalWait(at),null);
+  const stopped=s.command({type:'work.pause',workId:w.id,expectedVersion:claim.version},user);
+  assert.equal(stopped.status,'paused');
+  assert.throws(()=>s.command(resolution,agent,{coordinatorSessionId:agent.sessionId}),{code:'CONFLICT'});
+  assert.throws(()=>s.command(resolution,agent,{coordinatorSessionId:'other-bus'}),{code:'FORBIDDEN'});
+  const resumed=s.command({type:'work.resume',workId:w.id,expectedVersion:stopped.version},user);
+  assert.equal(resumed.status,'waiting');assert.equal(resumed.wait.nextCheckAt,at);
+  assert.equal(s.readyWork().length,0);
+  const retry=s.claimExternalWait(w.id,resumed.version,at);
+  const queued=s.command({...resolution,expectedVersion:retry.version},agent,{coordinatorSessionId:agent.sessionId});
+  assert.equal(queued.status,'queued');assert.equal(queued.wait.handoff.information,'Check Bin-B9');
+  assert.equal(s.reserveRun(w.id).sessionId,run.sessionId);
+});
+
 test('rework previews transitive consumers, requires fresh user impact confirmation and preserves history',t=>{
   const f=fixture(t);let s=f.store;
   const a=approve(s,create(s,{outputs:[{name:'data',required:true}]}),true),ar=result(s,a,{data:'v1'});

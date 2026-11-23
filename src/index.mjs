@@ -42,6 +42,7 @@ async function initialize(ctx,config,bindingReady,directory,controlPath) {
   const context=await createLoomContext(ctx,{
     directory:join(directory,'context'),workspaceId:workspace.workspaceId,
     getSettings:()=>store.getSettings(),query:request=>store.query(request),
+    searchProjectSessions:request=>engine.searchProjectSessions(request),
     command:(request,actor)=>engine.command(request,{kind:'agent',...(actor?.sessionId?{sessionId:actor.sessionId}:{})}),
     modelCatalog:()=>ctx.sessionController.modelCatalog(),
     resolveBus:id=>ctx.sessionController.resolveAgent(id),

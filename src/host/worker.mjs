@@ -44,7 +44,7 @@ export function createWorkerBinder(store) {
         const runId=pending.get(exec);pending.delete(exec);
         if(!result.isError) terminalRunId=runId;
       });
-      scoped.tools.register(defineTool({name:'loom_report',description:'Finish this execution with a result, external wait, or uncertain receipt. For external results, check available project records and the original operation first. Schedule a read-only recheck with wait.checkMethod and nextCheckAt, or uncertainty.followUp when the original receipt is unclear. Ask for missingInformation only when existing sources cannot answer; record the sources checked in attempted. Include the bilingual document. Keep handoff values in outputs and list files delivered to the user in deliverables.',
+      scoped.tools.register(defineTool({name:'loom_report',description:'Finish this execution with a result, external wait, or uncertain receipt. For external results, report the original reference, what to check, and when. If a necessary clue is missing, record the sources already checked in attempted and the gap in missingInformation for the coordinator. Include the bilingual document. Keep handoff values in outputs and list files delivered to the user in deliverables.',
         parameters:{report:reportSchema},executionMode:()=>({kind:'exclusive'}),
         output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},
         execute:async(args,exec)=>{

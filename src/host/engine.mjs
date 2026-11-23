@@ -18,6 +18,7 @@ export class LoomEngine {
     this.active=null; this.timer=null; this.error=null; this.lastTick=null;
     this.sentControls=new Set();
     this.controlActive=null;
+    this.coordinationActive=null; this.coordinationRetryAt=0;
     this.verifications=new Map();
   }
 
@@ -53,7 +54,7 @@ export class LoomEngine {
   async command(input,actor) {
     if(input.type==='work.retryAcceptance') return this.retryAcceptance(input,actor);
     if(isUserCleanupCommand(input.type)) return this.store.command(input,actor);
-    if(input.type==='work.addReport') {
+    if(['work.addReport','work.resolveWait'].includes(input.type)) {
       return this.store.command(input,actor,{coordinatorSessionId:this.context.getBus()?.sessionId});
     }
     const previous=this.store.replayCommand(input,actor);
@@ -115,6 +116,37 @@ export class LoomEngine {
     return result;
   }
 
+  async searchProjectSessions(request) {
+    const invalid=(message,code)=>Object.assign(new Error(message),{code});
+    if(typeof request.workId!=='string' || typeof request.query!=='string' || !request.query.trim() || Buffer.byteLength(request.query)>240) throw invalid('请提供工作ID和不超过240字节的搜索词','INVALID_INPUT');
+    const work=this.store.getWork(request.workId);
+    if(work===null || work.status!=='waiting' || !work.wait.coordination) throw invalid('工作当前没有待协调的外部操作','INVALID_STATE');
+    const project=this.ctx.workspaceRegistry.get(work.workspaceId), provider=this.ctx.get('sessionQuery');
+    if(!project || !provider) throw invalid('项目会话搜索不可用','LOOM_SESSION_SEARCH_UNAVAILABLE');
+    const ids=[...new Set(project.sessionIds)].filter(id=>id!==work.sessionId).reverse(), offset=request.offset??0;
+    if(!Number.isSafeInteger(offset) || offset<0 || offset>ids.length) throw invalid('会话搜索位置无效','INVALID_INPUT');
+    const signal=AbortSignal.any([this.abort.signal,AbortSignal.timeout(10000)]);
+    const filters=[{kind:'type',values:['user/message','assistant/message']},{kind:'surface',values:['current']},{kind:'text',text:request.query.trim()}];
+    const items=[];
+    let next=offset;
+    for(;next<Math.min(ids.length,offset+8) && items.length<4;next++) {
+      signal.throwIfAborted();
+      const sessionId=ids[next], hits=await provider.filterEvents(sessionId,filters);
+      signal.throwIfAborted();
+      const match=hits.at(-1);
+      if(match) {
+        const pos=match.text.toLowerCase().indexOf(request.query.trim().toLowerCase());
+        const snippet=Array.from(match.text.slice(Math.max(0,pos-60))).slice(0,240).join('');
+        items.push({sessionId,eventSeq:match.seq,snippet:redact(snippet)});
+      }
+    }
+    const current=this.store.getWork(work.id);
+    if(current===null || current.version!==work.version) throw invalid('外部等待已更新，请重新核对','CONFLICT');
+    const allowed=new Set(this.ctx.workspaceRegistry.get(work.workspaceId)?.sessionIds ?? []);
+    const nextOffset=next<ids.length ? next : null;
+    return {workVersion:work.version,hasMore:nextOffset!==null,nextOffset,items:items.filter(({sessionId})=>allowed.has(sessionId))};
+  }
+
   async evaluateAcceptance(work,run,checks,signal) {
     try {return await this.context.evaluateWork(work,run,checks,signal);}
     catch(error) {
@@ -147,7 +179,8 @@ export class LoomEngine {
     this.abort.signal.throwIfAborted();
     this.store.syncWorkspaces(this.native.workspaces());
     await this.control();
-    this.store.wakeWaiting();
+    if(this.context.dispatchExternalWait) this.coordinateWaiting();
+    else this.store.wakeWaiting();
     for(const run of this.store.recoverableRuns()) {
       this.abort.signal.throwIfAborted();
       if(this.verifications.has(run.id) || (run.nativeFault?.scope==='run' && Date.now()<run.nativeFault.retryAt)) continue;
@@ -159,6 +192,20 @@ export class LoomEngine {
     }
     this.lastTick=new Date().toISOString();
     return this.status();
+  }
+
+  coordinateWaiting() {
+    if(this.coordinationActive!==null || Date.now()<this.coordinationRetryAt) return;
+    const waiting=this.store.nextExternalWait();
+    if(waiting===null) return;
+    this.coordinationActive=this.context.dispatchExternalWait(()=>{
+      this.abort.signal.throwIfAborted();
+      return this.store.claimExternalWait(waiting.id,waiting.version);
+    }).catch(error=>{
+      if(this.abort.signal.aborted) return;
+      this.coordinationRetryAt=Date.now()+60000;
+      this.ctx.logger.error(error);
+    }).finally(()=>{this.coordinationActive=null;});
   }
 
   schedule(run) {
@@ -278,7 +325,7 @@ export class LoomEngine {
       return;
     }
     if(candidate && ['wait','uncertain'].includes(candidate.report.kind)) {
-      this.store.settleReport(run.id,{callId:candidate.source.callId,eventCursor:completion.endSeq});
+      this.store.settleReport(run.id,{callId:candidate.source.callId,eventCursor:completion.endSeq,coordinate:Boolean(this.context.dispatchExternalWait)});
       return;
     }
     const summary=candidate?.report.kind==='result'?candidate.report.summary:completion.summary;
@@ -382,7 +429,7 @@ export class LoomEngine {
     this.abort.abort();
     const tasks=[...this.verifications.values()];
     for(const task of tasks) task.controller.abort();
-    const results=await Promise.allSettled([...(this.active===null?[]:[this.active]),...(this.controlActive===null?[]:[this.controlActive]),...tasks.map(async task=>{
+    const results=await Promise.allSettled([this.active,this.controlActive,this.coordinationActive,...tasks.map(async task=>{
       try {await task.task;}
       catch(error) {
         if(error.code!=='CHECK_STOP_UNCONFIRMED') throw error;

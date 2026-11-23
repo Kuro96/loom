@@ -133,8 +133,8 @@ source = {sessionId,requestId,turn,callId};
 - `reportRun(runId,report,source)` 核 Run/session/requestId 及可提交状态，按 callId 保存候选。Run.reports 固定为 `[{report,source}]`，每个新/迁移 Run 初始化 []。同 callId 同内容重放，冲突为 CONFLICT；每 Run 最多 20 候选。
 - 报告根与嵌套拒绝执行身份及授权字段，如 actor/workId/runId/sessionId/requestId/authorization/modelConsent/checksConsent/permissionPreset/autoAccept。输出须有声明，业务 model 输出作为 JSON 数据保存。
 - operationId 固定为 Work.id，远端引用/条件/原因须为非空文字。nextCheckAt 须是带时区有效日期，在报告时位于未来 30 天以内。
-- `settleReport(runId,{callId,eventCursor})`：wait 或带 `uncertainty.followUp:{checkMethod,nextCheckAt}` 的回执将 Run/Work 置 waiting；其他 uncertain 将 Run 置 uncertain、Work 置 paused。`attempted` 与 `missingInformation` 成对记录缺口。待补信息使用用户提交的 `work.resume {workId,expectedVersion,information}` 继续原操作。收口保存远端引用，释放活动锁；相同收口幂等。result 使用 finishRun。
-- `wakeWaiting(at=now(),limit=20)` 将到期 waiting Work 排回 queued，返回本次唤醒数组，上限 200。保留 Work/session/operationId；下一 Run 保存 wait 及原 inputs/consumedResults，提示先核原操作状态。暂停/取消的等待保持状态。
+- `settleReport(runId,{callId,eventCursor,coordinate})`：wait 或带 `uncertainty.followUp:{checkMethod,nextCheckAt}` 的回执定时等待；正式 Host 同时把无复查时间的 uncertain 交给总控立即协调。`attempted` 与 `missingInformation` 成对记录运行者核过的来源及缺口。总控确认确实缺信息后，待补信息使用 `work.resume {workId,expectedVersion,information}` 继续原操作。
+- Host 根据 `nextExternalWait` 选到期工作，使用 `claimExternalWait` 绑定版本并持久保存复查退避时间，再通知总控。`work.resolveWait` 验证当前总控身份、工作版本和操作 ID；可保存交接线索并排回队列、安排下次检查，或登记具体待补信息。下一 Run 采用同一 Work/session/operationId、原 inputs/consumedResults，并携带已查来源及线索。暂停与取消适用原有控制；变更后的工作拒绝迟到的协调结果。
 
 核心保存候选。Host 核同归属 turn 正常结束、对应原生 tool/result 成功、会话 idle 且活动归零，再调用 finishRun/settleReport。Host 负责失败回执诊断、恢复成功事实重建及原生工具终结保护。取消 waiting 结束本地跟踪，保留远端引用供展示及对账。
 

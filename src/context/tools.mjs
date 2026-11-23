@@ -69,6 +69,10 @@ function compactItem(item,kind) {
 export async function querySummary(request,dependencies) {
   const {query,state,config}=dependencies;
   if(request.kind==='bus.display') return resolveDisplayed(request,dependencies);
+  if(request.kind==='project.sessionSearch') {
+    if(!dependencies.searchProjectSessions) throw contextError('LOOM_SESSION_SEARCH_UNAVAILABLE','原生会话搜索不可用');
+    return assertQueryBudget(await dependencies.searchProjectSessions(request),config);
+  }
   if(request.detail===true) return queryDetail(request,dependencies);
   if(request.kind==='rework') {
     const result=await query(request);
@@ -175,10 +179,10 @@ function toolRequest(args,name) {
   visit(request);
   return request;
 }
-export function createContextTools({defineTool,query,command,state,config,sessionId,stageDisplay}) {
+export function createContextTools({defineTool,query,command,state,config,sessionId,stageDisplay,searchProjectSessions}) {
   return [
-    ['loom_query',QUERY_DESCRIPTION,request=>querySummary(request,{query,state,config:config()})],
-    ['loom_command',COMMAND_DESCRIPTION+REPORT_GUIDANCE,async request=>commandSummary(await command(request,{kind:'agent',sessionId}),config())],
+    ['loom_query',QUERY_DESCRIPTION+' 外部等待时可查询 {kind:"project.sessionSearch",workId,query,offset?}，搜索该工作所属项目的已关联会话，返回有来源的摘录；nextOffset 非空时继续查下一页。',request=>querySummary(request,{query,state,config:config(),searchProjectSessions})],
+    ['loom_command',COMMAND_DESCRIPTION+REPORT_GUIDANCE+' work.resolveWait:{workId,expectedVersion,operationId,sources:[string],action:"continue"|"wait"|"ask",idempotencyKey?}。继续时附 information（交接给原工作会话）；复查时附 condition、checkMethod、nextCheckAt；只有关键线索缺失时用 ask 并附具体 missingInformation。',async request=>commandSummary(await command(request,{kind:'agent',sessionId}),config())],
     ['loom_focus','保存项目、工作、工作流焦点。JSON {workspaceId?,workflowId?,workId?,useId?,constraints?,references?,latestIntent?}。向用户发布可按序号指代的清单时，单独调用 {display:[{kind,id},...]}，按实际展示顺序传入项目(workspace)、工作(work)、工作流(workflow)或批次(use)。把返回的 text 原样作为最终回复；同一轮正式回复匹配后，编号才可引用。',async request=>{
       if(!Object.hasOwn(request,'display')) return assertQueryBudget(summarizeValue(state.setFocus(request)),config());
       if(stageDisplay===undefined) throw contextError('LOOM_DISPLAY_INVALID','编号清单需要总控对话');

@@ -24,7 +24,8 @@ export async function startupHost(respond=(_wire,_req,res)=>{res.writeHead(418);
   try {
     await add('dsh-llm-pi-ai',{providers:{'loom-test-provider':{api:'openai-completions',baseURL:`http://127.0.0.1:${server.address().port}/v1`,headers:{authorization:'Bearer local-startup'},models:[{id:testModel.model,...modelOptions}],retryPolicy:{mode:'normal',maxRetries:0}}}});
     await add('dsh-agent-default-model',testModel);
-    await add('dsh-session-query');await add('dsh-session-title',{fallbackMaxWords:8,fallbackMaxBytes:96,maxTitleBytes:120});
+    await add('dsh-session-query-sqlite',{path:':memory:',openAt:'never'});
+    await add('dsh-session-title',{fallbackMaxWords:8,fallbackMaxBytes:96,maxTitleBytes:120});
     await add('dsh-credentials-local',{dshHome:host.directory,path:join(host.directory,'credentials'),watch:false});
     await add('dsh-host-webserver',{host:'127.0.0.1',port:0});
     await add('dsh-client-connection');await add('dsh-typert-registry');await add('dsh-api-remote-access');await add('dsh-api-gateway');

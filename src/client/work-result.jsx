@@ -34,7 +34,9 @@ function WaitDetail({ wait, status }) {
   if (!wait) return null;
   return <section aria-label="外部操作"><h3>{wait.missingInformation ? '需要补充信息' : status === 'waiting' ? '等待外部结果' : wait.reason ? '远端结果待核实' : '远端操作'}</h3>
     <dl className="loom-summary"><dt>远端引用</dt><dd>{wait.remoteRef}</dd>{wait.condition && <><dt>恢复条件</dt><dd>{wait.condition}</dd></>}{wait.checkMethod && <><dt>核对方法</dt><dd>{wait.checkMethod}</dd></>}{wait.nextCheckAt && <><dt>下次检查</dt><dd>{new Date(wait.nextCheckAt).toLocaleString()}</dd></>}{wait.reason && <><dt>待处理原因</dt><dd>{wait.reason}</dd></>}{wait.attempted && <><dt>已查来源</dt><dd>{wait.attempted}</dd></>}{wait.missingInformation && <><dt>需要补充</dt><dd>{wait.missingInformation}</dd></>}</dl>
-    {status === 'cancelled' ? <p className="loom-warning">本地跟踪已结束 · 远端操作状态需另行核实</p> : status === 'waiting' && <p className="loom-hint">调度器会在到期后继续核对这笔操作。</p>}
+    {wait.handoff?.information && <section><h4>总控交接</h4><SummaryText>{wait.handoff.information}</SummaryText>
+      <details><summary>线索来源</summary><ul>{wait.handoff.sources.map((source, index) => <li key={index}>{source}</li>)}</ul></details></section>}
+    {status === 'cancelled' ? <p className="loom-warning">本地跟踪已结束 · 远端操作状态需另行核实</p> : status === 'waiting' && <p className="loom-hint">到期后由总控查找线索并安排下一步。</p>}
   </section>;
 }
 
