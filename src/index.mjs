@@ -76,7 +76,7 @@ async function initialize(ctx,config,bindingReady,directory,controlPath) {
     models:()=>engine.native.modelCatalog(),
     permissions:()=>ctx.permissionPresets.catalog(),
     ensureBus:()=>context.ensureBus(),
-    nativeSessions:()=>engine.native.sessions(),
+    nativeSessions:({workspaceId},signal)=>engine.native.sessions(workspaceId,signal),
     tick:()=>engine.tick(),
   };
   for(const [endpoint,handler] of Object.entries(handlers)) ctx.connection.fetch.register({

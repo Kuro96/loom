@@ -204,9 +204,11 @@ export async function createLoomContext(ctx, options) {
     if(error.name!=='SessionPersistenceCorruptionError' || error.cause?.message!=='system/message requires a protected first surface head') throw error;
     try {
       const sourceId=state.value.current.sessionId;
-      const location=ctx.get('sessionPersistence').locate({id:sourceId,cwd:workspace.path});
-      if(location.kind!=='jsonl') throw error;
-      const bytes=await readFile(location.path);
+      // Native open enforces the system head; stat can still identify this exact artifact.
+      const stored=await ctx.get('sessionPersistence').stat(sourceId,{signal:closing.signal});
+      const location=stored?.location;
+      if(stored?.formatStatus!=='current' || stored.header.id!==sourceId || stored.header.cwd!==workspace.path || location?.kind!=='jsonl' || !/\.jsonl(?:\.zstd)?$/.test(location.path)) throw error;
+      const bytes=await readFile(location.path,{signal:closing.signal});
       let plaintext=bytes;
       if(location.path.endsWith('.zstd')) {
         const frames=[];let offset=0,remaining=64*1024*1024;

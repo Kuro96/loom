@@ -59,11 +59,11 @@ test('existing sessions load on demand and a listing error does not interrupt wo
   const calls = [], commands = [];
   let created, closed = 0;
   const view = await mount(t, forms.CreateWork, { workspaceId: workspaces[0].workspaceId, workspaces, catalog, defaultModel: model,
-    api: { rpc: async method => {
+    api: { rpc: async (method, payload) => {
       if (method !== 'nativeSessions') return { presets: [], defaultOptions: [] };
-      calls.push(method);
+      calls.push(payload);
       if (calls.length === 1) throw failure;
-      return [session, { ...session, workspaceId: 'other-project', sessionId: 'other-session' }];
+      return { items: [session], unavailable: [{ sessionId: 'unreadable-session' }] };
     } },
     execute: command => { commands.push(command); return store.command(command, { kind: 'user' }); },
     onCreated(work) { created = work; }, onClose() { closed++; },
@@ -72,7 +72,7 @@ test('existing sessions load on demand and a listing error does not interrupt wo
   await view.change('工作标题', '核对资料');
   const advanced = view.renderer.root.findAllByType('details').find(node => text(node.children[0]) === '范围、检查与关联会话');
   await act(async () => advanced.props.onToggle({ currentTarget: { open: true } }));
-  assert.equal(calls.length, 1);
+  assert.deepEqual(calls, [{ workspaceId: workspaces[0].workspaceId }]);
   assert.match(text(view.renderer.root.findByProps({ role: 'alert' }).findByType('p')), /已有会话.*仍可创建独立工作/);
   assert.equal(view.label('关联已有会话').props.value, '');
   assert.equal(view.button('创建工作').props.disabled, false);
@@ -83,12 +83,33 @@ test('existing sessions load on demand and a listing error does not interrupt wo
 
   await act(async () => view.button('重试').props.onClick());
   assert.equal(calls.length, 2);
-  assert.deepEqual(view.label('关联已有会话').findAllByType('option').map(option => option.props.value), ['', 'existing-session']);
+  const options=view.label('关联已有会话').findAllByType('option');
+  assert.deepEqual(options.filter(option => !option.props.disabled).map(option => option.props.value), ['', 'existing-session']);
+  assert.match(text(options.find(option => option.props.disabled)), /暂不可读/);
   assert.equal(view.renderer.root.findAllByProps({ role: 'alert' }).length, 0);
   await view.change('工作标题', '沿用已有会话');
   await view.change('关联已有会话', 'existing-session');
   await view.submit();
   assert.equal(commands[1].sessionId, 'existing-session');
+});
+
+test('switching projects keeps the new session directory when the previous request returns late', async t => {
+  const projects = [...workspaces, { workspaceId: 'other', title: '交付', path: 'D:/private/other' }];
+  const first = Promise.withResolvers(), second = Promise.withResolvers();
+  const rpc = async (method, payload) => method === 'nativeSessions'
+    ? (payload.workspaceId === projects[0].workspaceId ? first.promise : second.promise) : { defaultOptions: [] };
+  const view = await mount(t, forms.CreateWork, { workspaceId: projects[0].workspaceId, workspaces: projects,
+    catalog, defaultModel: model, api: { rpc } });
+  const advanced = view.renderer.root.findAllByType('details').find(node => text(node.children[0]) === '范围、检查与关联会话');
+  await act(async () => advanced.props.onToggle({ currentTarget: { open: true } }));
+  await view.change('所属项目', 'other');
+  const directory = sessionId => ({ items: [{ sessionId, title: sessionId }], unavailable: [] });
+  await act(async () => second.resolve(directory('other-session')));
+  await view.change('关联已有会话', 'other-session');
+  await act(async () => first.resolve(directory('old-session')));
+  const select = view.label('关联已有会话');
+  assert.equal(select.props.value, 'other-session');
+  assert.deepEqual(select.findAllByType('option').map(option => option.props.value), ['', 'other-session']);
 });
 
 test('reusing a template preserves scalar types and identifies the missing input field before save', async t => {

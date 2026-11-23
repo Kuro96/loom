@@ -16,8 +16,8 @@ export async function deadline(promise,label,ms=5000) {
   try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(`timeout: ${label}`)),ms);})]);}
   finally{clearTimeout(timer);}
 }
-export async function startupHost(respond=(_wire,_req,res)=>{res.writeHead(418);res.end('startup transport probe');}, modelOptions={}) {
-  const host=await nativeHost(),received=[];
+export async function startupHost(respond=(_wire,_req,res)=>{res.writeHead(418);res.end('startup transport probe');}, modelOptions={},compression='none') {
+  const host=await nativeHost(compression),received=[];
   const server=createServer(async(req,res)=>{req.setEncoding('utf8');let body='';for await(const part of req)body+=part;const wire=JSON.parse(body);received.push(wire);await respond(wire,req,res);});
   server.listen(0,'127.0.0.1');await once(server,'listening');
   const add=async(name,config={})=>{const mod=native(name);return deadline(host.root.plugin(mod.default??mod,config).await(),`load ${name}`);};
@@ -36,7 +36,7 @@ export async function startupHost(respond=(_wire,_req,res)=>{res.writeHead(418);
     await add('dsh-pwsh-sandbox',{cwd:host.directory});await add('dsh-user-approval');await add('dsh-permission-presets');
     await add('dsh-api-workspace-controller');await add('dsh-api-session-controller',{nativeOpen:false});
     let ctx;
-    await host.root.plugin({name:'startup-driver',inject:[...inject.filter(name=>name!=='loomBootstrap'),'sessions'],apply(c){ctx=c;}}).await();
+    await host.root.plugin({name:'startup-driver',inject:[...inject.filter(name=>name!=='loomBootstrap'),'sessions','sessionPersistence'],apply(c){ctx=c;}}).await();
     return {...host,ctx,received,async close(){server.close();await once(server,'close');await host.close();}};
   }catch(error){server.close();await once(server,'close');await host.close();throw error;}
 }

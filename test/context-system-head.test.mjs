@@ -3,27 +3,13 @@ import assert from 'node:assert/strict';
 import { dirname, join } from 'node:path';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { installed, native, nativeHost, require as nativeRequire } from './context-native-helper.mjs';
 import { BUS_SYSTEM, createLoomContext } from '../src/context/index.mjs';
 import { BusState } from '../src/context/state.mjs';
 
-async function compressedHost() {
-  const directory=await mkdtemp(join(process.env.TMPDIR,'loom-head-zstd-'));
-  const {Context}=native('cordis'),root=new Context();
-  for(const name of ['dsh-storage','dsh-session-projection','dsh-session','dsh-system-prompt','dsh-tools','dsh-tool-executor-native','dsh-llm','dsh-agent','dsh-token-meter']) {const mod=native(name);await root.plugin(mod.default ?? mod).await();}
-  await root.plugin(native('dsh-storage-json'),{root:join(directory,'storage')}).await();
-  await root.plugin(native('dsh-storage-domain'),{backend:'json'}).await();
-  await root.plugin(native('dsh-session-persistence-jsonl'),{root:join(directory,'sessions'),compression:'zstd'}).await();
-  await root.plugin(native('dsh-workspace').default).await();
-  await root.plugin(native('dsh-agent-loop').default,{agents:[]}).await();
-  let ctx;await root.plugin({name:'loom-head-zstd',inject:['agents','sessions','llm','tools','systemPrompt','tokenMeter','workspaceRegistry','sessionPersistence'],apply(c){ctx=c;}}).await();
-  const workspace=await ctx.workspaceRegistry.create(directory,'Loom head zstd');
-  return {root,ctx,directory,workspace,async close(){await root.fiber.dispose();await rm(directory,{recursive:true,force:true});}};
-}
-
 async function fixture(compression='none') {
-  const host=await (compression==='zstd' ? compressedHost() : nativeHost()),received=[];
+  const host=await nativeHost(compression),received=[];
   const server=createServer(async(req,res)=>{let body='';for await(const part of req)body+=part;received.push(JSON.parse(body));res.writeHead(418);res.end('system head wire probe');});
   server.listen(0,'127.0.0.1');await once(server,'listening');
   await host.root.plugin(native('dsh-llm-pi-ai'),{providers:{'loom-test-provider':{api:'openai-completions',baseURL:`http://127.0.0.1:${server.address().port}/v1`,headers:{authorization:'Bearer local-probe'},models:[{id:'probe',maxTokens:128}],retryPolicy:{mode:'normal',maxRetries:0}}}}).await();
@@ -69,8 +55,8 @@ test('rotation retains identical system and tools on the actual Pi-ai wire', {sk
   } finally {if(manager)await manager.dispose();await f.close();}
 });
 
-async function recoverLegacy(tampered) {
-  const f=await fixture('zstd');let manager;
+async function recoverLegacy(compression,tampered) {
+  const f=await fixture(compression);let manager;
   try {
     const selection=f.settings.roleModels.bus;
     {
@@ -137,6 +123,6 @@ Keep answers concise. Ask for clarification when a workspace, reference or reque
   } finally {if(manager)await manager.dispose();await f.close();}
 }
 
-test('shared restoration preserves the released system identity and tool history',{skip:!installed},()=>recoverLegacy(false));
-
-test('shared restoration refuses an altered system identity',{skip:!installed},()=>recoverLegacy(true));
+test('shared restoration preserves the released system identity and tool history from Zstandard',{skip:!installed},()=>recoverLegacy('zstd',false));
+test('shared restoration preserves the released system identity and tool history from plaintext',{skip:!installed},()=>recoverLegacy('none',false));
+test('shared restoration refuses an altered system identity',{skip:!installed},()=>recoverLegacy('zstd',true));

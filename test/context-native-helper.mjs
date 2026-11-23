@@ -10,7 +10,7 @@ if(installed) registerHooks({resolve(specifier,context,next) {
   return next(specifier,context);
 }});
 export const native = name => require(`@deepseek-ai/${name}`);
-export async function nativeHost() {
+export async function nativeHost(compression='none') {
   const directory=await mkdtemp(join(process.env.TMPDIR,'loom-native-'));
   const {Context}=native('cordis'); const root=new Context();
   for(const name of ['dsh-storage','dsh-session-projection','dsh-session','dsh-system-prompt','dsh-tools','dsh-tool-executor-native','dsh-llm','dsh-agent','dsh-token-meter']) {
@@ -18,7 +18,7 @@ export async function nativeHost() {
   }
   await root.plugin(native('dsh-storage-json'),{root:join(directory,'storage')}).await();
   await root.plugin(native('dsh-storage-domain'),{backend:'json'}).await();
-  await root.plugin(native('dsh-session-persistence-jsonl'),{root:join(directory,'sessions'),compression:'none'}).await();
+  await root.plugin(native('dsh-session-persistence-jsonl'),{root:join(directory,'sessions'),compression}).await();
   await root.plugin(native('dsh-workspace').default).await();
   await root.plugin(native('dsh-agent-loop').default,{agents:[]}).await();
   let ctx;

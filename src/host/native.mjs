@@ -3,6 +3,7 @@ import { applyPermissionPreset } from '../permissions.mjs';
 
 const retryableIO=new Set(['ETIMEDOUT','EAGAIN','EBUSY','ECONNRESET','ECONNREFUSED','EPIPE']);
 const retryableSession=new Set(['session/not-found','session/writer-held','session/agent-busy','session/workspace-attach-failed']);
+const unreadableSession=new Set(['session/not-found','SESSION_QUERY_PERSISTENCE_FAILED','SESSION_QUERY_CORRUPT_SESSION']);
 
 export class NativeRunFailure extends Error {
   constructor(operation,code,cause) {
@@ -71,7 +72,7 @@ export class NativeHarness {
   async validateAssociation(workspaceId,sessionId) {
     const workspace=this.ctx.workspaceRegistry.get(workspaceId);
     if(workspace===undefined) throw new Error('指定工作区已不存在');
-    if(!workspace.sessionIds.includes(sessionId)) throw new Error('执行会话必须属于所选工作区');
+    if(!workspace.getSessionHeaders().some(header=>header.id===sessionId && header.origin!=='subagent')) throw new Error('执行会话必须属于所选工作区');
     const state=await this.state(sessionId);
     const activity=await this.activity(sessionId);
     if(state.running || activity.length || (state.queue!==null && state.queue.length)) throw new Error('会话仍有活动任务或排队输入，请完成后再关联');
@@ -134,8 +135,46 @@ export class NativeHarness {
     return {stopped:!state.running && !state.queue?.length && activity.length===0,detail:activity};
   }
 
-  async sessions() {
-    const value=await this.ctx.sessionController.list({},this.signal);
+  async projectSessions(workspace,signal) {
+    const items=[],unavailable=[];
+    const controller=this.ctx.sessionController;
+    for(const {id:sessionId,origin} of workspace.getSessionHeaders()) {
+      signal.throwIfAborted();
+      if(origin==='subagent') continue;
+      const address={sessionId};
+      try {
+        const state=await controller.state(address,signal);
+        const projection=await controller.projections(address,signal);
+        if(projection===null) unavailable.push({sessionId});
+        else items.push({sessionId,workspaceId:workspace.id,title:projection.values.title ?? sessionId,running:state.running});
+      } catch(error) {
+        signal.throwIfAborted();
+        const code=error.code==='gateway/internal'?error.cause?.code:error.code;
+        if(!unreadableSession.has(code)) throw error;
+        unavailable.push({sessionId});
+      }
+    }
+    signal.throwIfAborted();
+    return {items,unavailable};
+  }
+
+  async sessions(workspaceId,requestSignal=this.signal) {
+    const signal=AbortSignal.any([this.signal,requestSignal]);
+    if(workspaceId!==undefined) {
+      if(typeof workspaceId!=='string' || !workspaceId) throw new Error('请选择所属项目');
+      const workspace=this.ctx.workspaceRegistry.get(workspaceId);
+      if(workspace===undefined) throw new Error('指定工作区已不存在');
+      return this.projectSessions(workspace,signal);
+    }
+    let value;
+    try {value=await this.ctx.sessionController.list({},signal);}
+    catch(error) {
+      signal.throwIfAborted();
+      if(error.code!=='SESSION_QUERY_PERSISTENCE_FAILED') throw error;
+      const items=[];
+      for(const workspace of this.ctx.workspaceRegistry.list()) items.push(...(await this.projectSessions(workspace,signal)).items);
+      return items;
+    }
     const workspaceBySession=new Map();
     for(const workspace of this.ctx.workspaceRegistry.list()) for(const id of workspace.sessionIds) workspaceBySession.set(id,workspace.id);
     return value.items.filter(row=>row.origin!=='subagent').map(row=>({sessionId:row.sessionId,title:row.projections?.values.title ?? row.sessionId,workspaceId:workspaceBySession.get(row.sessionId) ?? null,running:row.running}));

@@ -56,14 +56,18 @@ export function CreateWork({ workspaceId, workspaces, catalog, defaultModel, def
   const [execution, setExecution] = useState({ model: defaultModel, permissionPreset: defaultPermission, autoAccept: false });
   const [checks, setChecks] = useState([]), [sessionId, setSessionId] = useState('');
   const [loadSessions, setLoadSessions] = useState(false), [sessionAttempt, setSessionAttempt] = useState(0);
-  const [sessions, setSessions] = useState(null), [sessionError, setSessionError] = useState(null);
+  const [sessionRead, setSessionRead] = useState(null);
+  const sessionResult = sessionRead?.workspace === workspace && sessionRead.attempt === sessionAttempt ? sessionRead : null;
+  const sessions = sessionResult?.value, sessionError = sessionResult?.error;
   useEffect(() => {
-    if (!loadSessions) return;
+    if (!loadSessions || !workspace) return;
     let active = true;
-    setSessions(null); setSessionError(null); setSessionId('');
-    api.rpc('nativeSessions', {}).then(value => { if (active) setSessions(value); }, reason => { if (active) setSessionError(reason); });
+    api.rpc('nativeSessions', { workspaceId: workspace }).then(
+      value => { if (active) setSessionRead({ workspace, attempt: sessionAttempt, value }); },
+      error => { if (active) setSessionRead({ workspace, attempt: sessionAttempt, error }); },
+    );
     return () => { active = false; };
-  }, [api, loadSessions, sessionAttempt]);
+  }, [api, loadSessions, sessionAttempt, workspace]);
   const form = useSubmit(async () => {
     if (!workspace) throw new Error('请选择所属项目');
     const work = await execute(commandFor({ type: 'work.create', workspaceId: workspace, title: title.trim(), description, scope,
@@ -72,13 +76,14 @@ export function CreateWork({ workspaceId, workspaces, catalog, defaultModel, def
   });
   return <InlinePage title="新建工作" onBack={onClose} busy={form.busy}><form onSubmit={form.submit}>
     <ErrorNotice error={form.error} />
-    <Field label="所属项目 *"><WorkspacePicker workspaces={workspaces} value={workspace} onChange={value => { setWorkspace(value); setSessionId(''); }} /></Field>
+    <Field label="所属项目 *"><WorkspacePicker workspaces={workspaces} value={workspace} onChange={value => { setWorkspace(value); setSessionId(''); setSessionRead(null); }} /></Field>
     <Field label="工作标题 *"><input aria-label="工作标题" required value={title} onChange={event => setTitle(event.target.value)} placeholder="明确要交付的结果" /></Field>
     <Field label="说明与完成条件"><textarea aria-label="工作说明" rows={4} value={description} onChange={event => setDescription(event.target.value)} placeholder="目标、输入、产物和验收标准" /></Field>
     <ExecutionEditor api={api} catalog={catalog} value={execution} onChange={setExecution} showAcceptance={false} />
     <details onToggle={event => { if (event.currentTarget.open) setLoadSessions(true); }}><summary>范围、检查与关联会话</summary><Field label="操作范围"><input aria-label="工作操作范围" value={scope} onChange={event => setScope(event.target.value)} /></Field>
-    <Field label="关联已有会话（可选）" hint={loadSessions && !sessions && !sessionError ? '正在读取已有会话…' : undefined}><select aria-label="关联已有会话" value={sessionId} disabled={!sessions} onChange={event => setSessionId(event.target.value)}><option value="">新建独立会话</option>
-      {sessions?.filter(session => session.workspaceId === workspace).map((session, index) => <option key={session.sessionId} value={session.sessionId}>{sessionLabel(session, index)}{session.running ? ' · 执行中' : ''}</option>)}
+    <Field label="关联已有会话（可选）" hint={loadSessions && workspace && !sessionResult ? '正在读取已有会话…' : undefined}><select aria-label="关联已有会话" value={sessionId} disabled={!sessions} onChange={event => setSessionId(event.target.value)}><option value="">新建独立会话</option>
+      {sessions?.items.map((session, index) => <option key={session.sessionId} value={session.sessionId}>{sessionLabel(session, index)}{session.running ? ' · 执行中' : ''}</option>)}
+      {sessions?.unavailable.map((session, index) => <option key={session.sessionId} value={session.sessionId} disabled>{sessionLabel(session, sessions.items.length + index)} · 暂不可读</option>)}
     </select></Field>
     <ErrorNotice error={sessionError} message="已有会话列表暂不可用。仍可创建独立工作。" onRetry={() => setSessionAttempt(attempt => attempt + 1)} /><ChecksEditor checks={checks} onChange={setChecks} /></details>
     <footer><button className="loom-primary" disabled={form.busy || !workspace || !title.trim()}>{form.busy ? '创建中…' : '创建工作'}</button></footer>
