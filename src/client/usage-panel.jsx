@@ -21,7 +21,10 @@ function useUsage(api,key) {
     },error=>{if(active) setState({value:null,error});});
     return ()=>{active=false;};
   },[api,key,version]);
-  return {...state,retry:()=>setVersion(value=>value+1)};
+  const issue=state.value?.error;
+  const historical=issue?.code==='LOOM_USAGE_LEGACY';
+  return {...state,historicalCoverage:historical ? issue.message : null,issue:historical ? null : issue,
+    retry:()=>setVersion(value=>value+1)};
 }
 
 function coverage(value,legacy=false) {
@@ -85,10 +88,11 @@ function ModelList({value}) {
   return value.models.length>0 && <p>{value.models.map(model=>`${modelName(model)} × ${model.calls}`).join('、')}</p>;
 }
 
-function CallDetails({api,turnKey}) {
-  const {value,error,retry}=useUsage(api,turnKey);
+function CallDetails({api,turnKey,storageInSummary}) {
+  const {value,error,issue,retry}=useUsage(api,turnKey);
+  const repeatedStorage=storageInSummary && issue?.code==='LOOM_USAGE_STORAGE';
   return <>
-    <ErrorNotice error={error ?? value?.error} onRetry={retry} />
+    <ErrorNotice error={error ?? (repeatedStorage ? null : issue)} onRetry={retry} />
     {!value && !error && <p role="status">正在读取调用明细…</p>}
     {value?.calls.length>0 && <ol className="loom-usage-calls" aria-label="调用明细">{value.calls.map(call=><li key={call.callId}>
       <strong>第 {call.step} 步 · {call.purpose==='compaction'?'回顾':'主对话'} · {status[call.status]}</strong>
@@ -98,7 +102,7 @@ function CallDetails({api,turnKey}) {
   </>;
 }
 
-function TurnRow({turn,expanded,toggle,api,register}) {
+function TurnRow({turn,expanded,toggle,api,register,storageInSummary}) {
   const detailsId=useId();
   return <li className="loom-usage-row">
     <button type="button" aria-expanded={expanded} aria-controls={detailsId} ref={register} onClick={toggle}>
@@ -114,13 +118,13 @@ function TurnRow({turn,expanded,toggle,api,register}) {
         <ModelList value={turn.review} /><Metrics value={turn.review} expanded />
         <h4>含回顾合计 · {coverage(turn.combined,turn.legacy)}</h4><Metrics value={turn.combined} expanded />
       </>}
-      <CallDetails api={api} turnKey={turn.key} />
+      <CallDetails api={api} turnKey={turn.key} storageInSummary={storageInSummary} />
     </>}</div>
   </li>;
 }
 
 export function UsagePanel({api}) {
-  const {value,error,retry}=useUsage(api);
+  const {value,error,historicalCoverage,issue,retry}=useUsage(api);
   const [selected,setSelected]=useState(null), controls=useRef(new Map());
   const heading=useId();
   function choose(key) {
@@ -130,14 +134,14 @@ export function UsagePanel({api}) {
   }
   return <section className="loom-settings-section loom-usage" aria-labelledby={heading}>
     <div className="loom-usage-heading"><h3 id={heading}>总控用量</h3><button type="button" onClick={retry}>刷新用量</button></div>
-    {(value?.error || error?.code==='LOOM_USAGE_STORAGE') && <p className="loom-warning" role="status">{(value?.error ?? error).message}</p>}
-    <ErrorNotice error={error} onRetry={retry} />
+    {historicalCoverage && <p className="loom-hint" role="status">{historicalCoverage}</p>}
+    <ErrorNotice error={error ?? issue} onRetry={retry} />
     {!value && !error && <p role="status">正在读取总控用量…</p>}
     {value?.items.length===0 && <p className="loom-hint">暂无已结束的总控轮次。</p>}
     {value?.items.length>0 && <>
       <Chart rows={value.items} selected={selected} select={choose} />
       <h4>最近 {value.items.length} 轮</h4>
-      <ol className="loom-usage-list">{value.items.map(turn=><TurnRow key={turn.key} turn={turn} api={api} expanded={selected===turn.key}
+      <ol className="loom-usage-list">{value.items.map(turn=><TurnRow key={turn.key} turn={turn} api={api} expanded={selected===turn.key} storageInSummary={issue?.code==='LOOM_USAGE_STORAGE'}
         toggle={()=>setSelected(key=>key===turn.key?null:turn.key)} register={node=>{if(node) controls.current.set(turn.key,node);else controls.current.delete(turn.key);}} />)}</ol>
     </>}
   </section>;
