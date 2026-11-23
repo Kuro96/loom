@@ -173,6 +173,10 @@ export function UseWorkflow({ workflow, proposal = null, fromDetail = false, api
 export function ProposalDialog({ proposal, api, catalog, workspaces, execute, onClose, onConfirmed, onEdit, onEditDefinition, onDetails }) {
   const [commandFor] = useState(createCommandMemo);
   const workspace = workspaces.find(w => w.workspaceId === proposal.workspaceId);
+  const { title, description, stages } = proposal.definitionSnapshot;
+  const overview = splitRequirements(description).requirements.trim();
+  const summary = overview === title.trim() ? '' : overview;
+
   const available = Boolean(workspace && resolvedModel(proposal.execution.model, catalog));
   const form = useSubmit(async () => {
     if (!available) throw new Error('执行目标暂不可用，请刷新后重试');
@@ -182,8 +186,8 @@ export function ProposalDialog({ proposal, api, catalog, workspaces, execute, on
     onConfirmed({ ...result, use: saved }); onClose();
   });
   return <InlinePage title={reviewLabel()} onBack={onClose} busy={form.busy}><form onSubmit={form.submit}><ErrorNotice error={form.error} />
-    <h3>{proposal.definitionSnapshot.title}</h3><p>项目：{workspace?.title ?? '项目名称暂不可用'} · 本次共 {proposal.definitionSnapshot.stages.length} 项工作</p>
-    <SummaryText>{splitRequirements(proposal.definitionSnapshot.description).requirements}</SummaryText>
+    <h3>{title}</h3><p>项目：{workspace?.title ?? '项目名称暂不可用'} · {stages.length} 项工作</p>
+    <SummaryText>{summary}</SummaryText>
     <DefinitionSummary definition={proposal.definitionSnapshot} parameters={proposal.parameters} />
     <ExecutionSummary execution={proposal.execution} catalog={catalog} />
     {!available && <p role="status" className="loom-warning">{workspace ? '请在本次设置中选择可用的执行模型。' : '所属项目暂不可用，请刷新工作台。'}</p>}

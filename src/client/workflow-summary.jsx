@@ -33,33 +33,38 @@ export function DefinitionSummary({ definition, parameters = null, reviewStage =
   const shared = confirming ? (definition.parameters ?? []).filter(param => stages.filter(stage => Object.values(stage.inputs).some(ref => ref.kind === 'parameter' && ref.path[0] === param.name)).length > 1) : [];
   const sharedNames = new Set(shared.map(param => param.name));
   const rows = stages.map(stage => {
-    const primary = [], secondary = [];
+    const primary = [], secondary = [], inputNotes = [];
     for (const [name, ref] of Object.entries(stage.inputs ?? {})) {
-      const param = parameterFor(definition, ref), field = readerField(name, ref, param);
+      const param = parameterFor(definition, ref), field = readerField(name, ref, param, confirming);
       if (param) bound.add(param.name);
       const fromShared = param && sharedNames.has(param.name);
-      (field.secondary ? secondary : primary).push(<div key={name} className="loom-value-row"><dt>{field.label}{ref.kind === 'parameter' && ref.path.length > 1 && ` · ${ref.path.slice(1).join('.')}`}</dt><dd>{fromShared ? `沿用共用输入「${readerField(param.name, null, param).label}」` : <StageValue definition={definition} parameters={parameters} refValue={ref} />}</dd></div>);
+      if (field.detail && !fromShared) inputNotes.push(<p className="loom-description" key={name}>{field.label}：{field.detail}</p>);
+      (field.secondary ? secondary : primary).push(<div key={name} className="loom-value-row"><dt>{field.label}{ref.kind === 'parameter' && ref.path.length > 1 && ` · ${ref.path.slice(1).join('.')}`}</dt><dd>{fromShared ? `沿用共用输入「${readerField(param.name, null, param, true).label}」` : <StageValue definition={definition} parameters={parameters} refValue={ref} />}</dd></div>);
     }
     const checks = stage.checks ?? [], requires = splitRequirements(stage.instructions).requirements;
+    const longInstructions = confirming && (requires.length > 160 || requires.split('\n').length > 3);
     const prerequisites = stage.dependsOn?.length > 0 && <p>前置工作：{stage.dependsOn.map(id => stages.find(s => s.id === id)?.title ?? '来源工作').join('、')}</p>;
-    if (secondary.length || !confirming && !reviewStage && (requires || prerequisites || stage.scope || checks.length)) notes.push(<section key={stage.id}><h4>{stage.title}</h4>
-      {!confirming && requires && <p className="loom-description">{requires}</p>}{secondary.length > 0 && <dl className="loom-summary">{secondary}</dl>}
+    if (secondary.length || inputNotes.length || longInstructions || !confirming && !reviewStage && (requires || prerequisites || stage.scope || checks.length)) notes.push(<section key={stage.id}><h4>{stage.title}</h4>
+      {(!confirming || longInstructions) && requires && <p className="loom-description">{requires}</p>}{inputNotes}{secondary.length > 0 && <dl className="loom-summary">{secondary}</dl>}
       {!confirming && <>{prerequisites}{stage.scope && <p>操作范围：{stage.scope}</p>}<CheckSummary checks={checks} /></>}
     </section>);
     return <li key={stage.id}><strong>{stage.title}</strong>{!reviewStage && stage.manualGate && <span className="loom-hint"> · 需要放行</span>}
-      {(confirming || reviewStage) && requires && <p className="loom-description">{requires}</p>}
-      {primary.length > 0 && <dl className="loom-summary">{primary}</dl>}
-      {confirming && <>{stage.outputs.length > 0 ? <p>产出：{stage.outputs.map(output => (output.description || output.name) + (output.required ? '（必需）' : '')).join('、')}</p> : !checks.length && <p className="loom-hint">本项未单列产出或检查条件。</p>}
+      {(confirming || reviewStage) && requires && !longInstructions && requires.trim() !== stage.title && <p className="loom-description">{requires}</p>}
+      {primary.length > 0 && (confirming ? <section className="loom-stage-inputs"><h4>本步输入</h4><dl className="loom-summary">{primary}</dl></section> : <dl className="loom-summary">{primary}</dl>)}
+      {confirming && <>{stage.outputs.length > 0 && <p>产出：{stage.outputs.map(output => (output.description || output.name) + (output.required ? '（必需）' : '')).join('、')}</p>}
         {prerequisites}{stage.scope && !sharedScope && <p>操作范围：{stage.scope}</p>}<CheckSummary checks={checks} /></>}
       {reviewStage && <>{prerequisites}<CheckSummary checks={checks} />{reviewStage(stage)}</>}
     </li>;
   });
   const unused = (definition.parameters ?? []).filter(p => !bound.has(p.name));
+  const sharedFields = shared.map(param => ({ name: param.name, ...readerField(param.name, null, param, true) }));
+  const sharedNotes = sharedFields.filter(field => field.detail);
   return <section aria-label={confirming ? '本次输入清单' : '工作流步骤'}>
-    {shared.length > 0 && <section><h4>共用输入</h4><dl className="loom-summary">{shared.map(param => <div className="loom-value-row" key={param.name}><dt>{readerField(param.name, null, param).label}</dt><dd><ValueDisplay value={parameters[param.name]} /></dd></div>)}</dl></section>}
-    {sharedScope && <p>共用操作范围：{sharedScope}</p>}
+    {sharedFields.length > 0 && <section><h4>共用输入</h4><dl className="loom-summary">{sharedFields.map(field => <div className="loom-value-row" key={field.name}><dt>{field.label}</dt><dd><ValueDisplay value={parameters[field.name]} /></dd></div>)}</dl></section>}
+    {sharedScope && <p>{stages.length === 1 ? '操作范围' : '共用操作范围'}：{sharedScope}</p>}
     <ol className="loom-decision-steps">{rows}</ol>
-    {(notes.length > 0 || unused.length > 0 || definition.knowledge) && <details><summary>查看执行细节</summary>{notes}
+    {(notes.length > 0 || sharedNotes.length > 0 || unused.length > 0 || definition.knowledge) && <details><summary>执行说明</summary>
+      {sharedNotes.map(field => <p className="loom-description" key={field.name}>{field.label}：{field.detail}</p>)}{notes}
       {unused.length > 0 && <section><h4>未关联步骤的参数</h4>{unused.map(p => <p key={p.name}>{readerField(p.name, null, p).label}：<ValueDisplay value={parameters ? (Object.hasOwn(parameters, p.name) ? parameters[p.name] : '未填写') : (Object.hasOwn(p, 'default') ? p.default : '使用时填写')} /></p>)}</section>}
       {definition.knowledge && <p className="loom-description">{definition.knowledge}</p>}</details>}
   </section>;

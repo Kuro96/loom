@@ -179,6 +179,9 @@ button.loom-danger-text{color:var(--dsw-alias-state-error-primary)}
 @media(min-height:420px){:is(.loom-dialog,.loom-page-body)>form>footer{position:sticky;bottom:0;z-index:1}.loom-dialog{scroll-padding-block:58px 76px}.loom-page-body{scroll-padding-block-end:76px}}
 .loom-decision-steps{padding-inline-start:1.6em;margin:10px 0;font-size:13px;overflow-wrap:anywhere}
 .loom-decision-steps>li{padding:4px 0}.loom-decision-steps>li>dl.loom-summary{margin:2px 0;padding:0}
+.loom-stage-inputs{margin:12px 0;padding:8px 12px;border-inline-start:2px solid var(--loom-border);background:var(--loom-raised)}
+.loom-stage-inputs>h4{font-size:13px;font-weight:500;margin:0 0 4px}
+.loom-stage-inputs>dl.loom-summary{margin:0;padding:0}
 .loom-surface .loom-error{margin:12px 0}
 
 .loom-surface .loom-checkbox{padding:0;border:0;background:transparent}
@@ -281,7 +284,9 @@ ol.loom-arguments{display:block;padding-left:20px}
 .loom-arguments code,.loom-check-row code{font:12px/19px var(--ds-font-family-code);white-space:pre-wrap;overflow-wrap:anywhere}
 .loom-use-list{min-width:0}
 
-.loom-value-row{display:contents}
+dl.loom-summary:has(>.loom-value-row){display:flex;flex-direction:column;gap:8px}
+.loom-value-row{display:grid;min-width:0;gap:2px}
+.loom-value-row>dd>.loom-value:first-child{font-weight:500}
 .loom-value{white-space:pre-wrap;overflow-wrap:anywhere}
 .loom-step-input{min-width:0;padding:4px 0;margin:8px 0;overflow-wrap:anywhere}
 .loom-step-input h4{margin:2px 0 6px;font-size:13px;font-weight:500}

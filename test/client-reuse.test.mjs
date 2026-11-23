@@ -243,6 +243,31 @@ test('approval and editing show the same materials without requiring the reader 
   assert.doesNotMatch(editable, /sourceSha|dropReceipt|自动接收/);
 });
 
+test('batch confirmation shows the input value and decision without repeating the execution instructions', async t => {
+  const f = fixture(t);
+  const caption = '用户给出的送标任务标识；按项目登记核对批次与回包，不能仅凭文件名判定。';
+  const instructions = '核对送标登记、原图和标注回包，记录批次、来源及实际收到的资料。\n' + '按验收手册逐项核对组别和标签，记录缺项、重复及无法判断的样本。'.repeat(6);
+  const { use: proposal } = f.store.command({ type: 'use.create', workspaceId: 'project', model, parameters: { labelTask: 'Batch-07' }, definition: {
+    title: '标注回包验收', description: '标注回包验收', parameters: [{ name: 'labelTask', description: caption }], stages: [
+      { id: 'review', title: '验收标注回包', instructions, scope: '只写验收目录。', inputs: { labelTask: { kind: 'parameter', path: ['labelTask'] } },
+        outputs: [{ name: 'report', description: '验收报告', required: true }], checks: [{ kind: 'file', path: 'review/report.md' }] },
+      { id: 'notes', title: '整理记录' },
+    ],
+  } }, agent);
+  const view = await mount(t, forms.ProposalDialog, { ...f.props, proposal, onConfirmed() {} });
+  const form = view.renderer.root.findByType('form'), visible = visibleText(form);
+  assert.match(visible, /送标任务\s*Batch-07/);
+  assert.doesNotMatch(visible, /用户给出的送标任务标识|按验收手册逐项|本项未单列/);
+  assert.equal(visible.split(proposal.definitionSnapshot.title).length - 1, 1);
+  for (const value of ['只写验收目录', '验收报告', 'review/report.md', '确认执行本次 2 项工作']) assert.ok(visible.includes(value), value);
+  assert.match(text(form), /按验收手册逐项/);
+  assert.ok(text(form).includes(caption));
+  await view.submit();
+  const [saved] = f.store.query({ kind: 'work', useId: proposal.id }).items;
+  assert.equal(saved.description, instructions);
+  assert.equal(saved.inputs.labelTask.value, 'Batch-07');
+});
+
 test('standalone consent distinguishes inputs and permissions from execution internals', async t => {
   const f = fixture(t), work = f.store.command({ type: 'work.create', workspaceId: 'project', title: '校核清单', description: '---\nrevision: dev-only\n---\n核对清单。', scope: '指定目录', model, inputs: { destination: { kind: 'value', value: '结果.txt' }, sourceSha: { kind: 'value', value: '内部校验值' } }, outputs: [{ name: 'remoteRef', description: '远端内部标识' }] }, user);
   const view = await mount(t, forms.ConsentDialog, { ...f.props, work });

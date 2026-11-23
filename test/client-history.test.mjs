@@ -81,7 +81,7 @@ test('pending proposal opens the batch review and requires explicit confirmation
   assert.match(rows[0].props['aria-label'], /本批资料.*核对执行/);
   await act(async () => rows[0].props.onClick());
   const text = node => typeof node === 'string' ? node : node.children.map(text).join('');
-  assert.match(text(view.renderer.root.findByType('form')), /本次共 2 项工作.*选定批次.*执行模型/);
+  assert.match(text(view.renderer.root.findByType('form')), /项目：项目 · 2 项工作.*选定批次.*执行模型/);
   const [first, second] = view.renderer.root.findByProps({ 'aria-label': '本次输入清单' }).findByType('ol').children;
   assert.match(text(first), /逐一核对本批文件.*缺项时停止并报告.*本批清单/);
   assert.match(text(second), /checker.*--batch.*08/);

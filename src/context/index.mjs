@@ -96,13 +96,19 @@ export async function createLoomContext(ctx, options) {
     await ctx.llm.resolveCallConfig(selected);
     return selected;
   }
+  async function communicationGuidance() {
+    // Global lookup omits project roots and agent-scoped registrations.
+    const skill=await ctx.get('skills')?.get('cooperative-answering',{signal:closing.signal});
+    if(!skill?.invocation.modelInvocable || !['user-dsh','user-agents','bundled'].includes(skill.source)) return '';
+    return `Use the installed cooperative-answering skill for user-facing text. Loom's work and approval rules govern actions.\n\n${skill.content}`;
+  }
   async function setup(agentCtx,agent,handover) {
     if(disposed) throw contextError('LOOM_DISPOSED','Loom context is disposed');
     const binding=guardAgent(agent);
     if(binding?.owner===bindingOwner) return;
     binding.active=false;
     if(binding.plugin) await binding.plugin.dispose();
-    const selection=await role('bus');
+    const [selection,guidance]=await Promise.all([role('bus'),communicationGuidance()]);
     closing.signal.throwIfAborted();
     agent.model.select(selection);
     applyPermissionPreset(ctx,agent.session,getSettings().permissionPreset ?? null);
@@ -122,6 +128,7 @@ export async function createLoomContext(ctx, options) {
       scoped.tools.restrict({allow:[]});
       scoped.systemPrompt.section({name:'loom:identity',order:0,text:BUS_SYSTEM,complete:true,interpolate:false});
       scoped.systemPrompt.suppressRuntimeContext();
+      if(guidance) scoped.systemPrompt.context({name:'loom:communication',order:1,text:guidance,required:true,interpolate:false});
       scoped.systemPrompt.context({name:'loom:focus',order:0,text:()=>policy.snapshot,required:true,interpolate:false});
       let turn=null, draft=null, reply=null;
       scoped.on('session/event',(session,event)=>{
