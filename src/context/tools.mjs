@@ -131,7 +131,7 @@ async function resolveDisplayed(request,{query,state,config}) {
 export function commandSummary(result,config) {
   const target=result.use??result;
   const waiting=target.status==='proposed' || target.status==='awaiting_model';
-  const notice=waiting?{waitingFor:'user_confirmation',nextAction:'等待用户在工作台核对本次项目、输入、工作、输出、完成条件、模型及操作范围后确认。'}:{};
+  const notice=waiting?{waitingFor:'user_confirmation',nextAction:'在工作台「工作 → 待处理」打开本次提案，核对项目、输入、输出、完成条件、模型及操作范围后确认。'}:{};
   let summary={...summarizeValue(result),...notice};
   if(jsonBytes(summary)>config.queryMaxBytes) {
     const kind=target.definitionSnapshot && target.workIds?'use':target.stages?'workflow':Object.hasOwn(target,'modelRevision')?'work':target.status==='pending'||target.status==='resolved'?'intent':'workspace';
@@ -141,16 +141,22 @@ export function commandSummary(result,config) {
   return assertQueryBudget(summary,config);
 }
 
-const REPORT_GUIDANCE='跟进时，用 loom_query 查询本项目 kind:work、categories:["interaction"] 及用户所指的工作。按 workId 查询 run，按 reportCallId 核对本次已选报告、等待原因和预验收证据；用有界详情读完整内容。需要用户决定时，总控必须用 work.addReport:{workId,runId,expectedVersion,title,document:{english,chinese},idempotencyKey?} 追加独立的决定说明；需要归纳时可追加综合报告。查看 work.documents 避免重复。结合证据写清选项及影响，优先使用可用且适用的报告技能，先用简短英文陈述，再忠实译为中文。实施者原文与总控说明分开保留，预验收结论仅作证据。';
+const REPORT_GUIDANCE='跟进时，用 loom_query 查询本项目 kind:work、categories:["interaction"] 及用户所指的工作。按 workId 查询 run，按 reportCallId 核对本次已选报告、等待原因和预验收证据；用有界详情读完整内容。处理需要用户决定的工作时（区别于只读进度查询），总控必须用 work.addReport:{workId,runId,expectedVersion,title,document:{english,chinese},idempotencyKey?} 追加独立的决定说明；需要归纳时可追加综合报告。查看 work.documents 避免重复。结合证据写清选项及影响，优先使用可用且适用的报告技能，先用简短英文陈述，再忠实译为中文。实施者原文与总控说明分开保留，预验收结论仅作证据。';
+
+const PROPOSAL_GUIDANCE='项目、目标和关键输入明确时，先核对该项目的既有工作、待确认提案和可用工作流；有适用工作流用 workflow.start，否则用 use.create。新目标在同一轮只保存一份提案，并告知用户在工作台「工作 → 待处理」核对执行。仅在用户要求复用模板时保存工作流。重复请求展示既有记录，追加要求沿用当前目标和版本。进度查询、讨论和仅需聊天草稿的请求使用只读路径。缺少会改变结果的关键事实时，用 intent.create 保留原请求再澄清；已有匹配的待澄清请求时沿用，找到或创建目标后用 intent.resolve 关联。';
 
 export const BUS_TOOL_GUIDANCE = `面向用户统一使用“项目、工作、工作流”。项目对应原生Workspace；工作完成一组具体输入的目标；工作流保存可复用步骤说明。use是内部提案和工作归组记录。
-先查询项目和现有工作流，核对目标、本次输入及可用方法。展示本次工作、输入输出、完成条件、模型和操作范围，让用户选择“执行一次”或“保存为工作流并执行”。执行一次使用use.create；保存并执行使用workflow.create后workflow.start。两者保存proposed提案，明确告知等待用户在工作台确认。独立work.create同样等待用户确认。工作台与总控读取同一份持久记录。
+${PROPOSAL_GUIDANCE}展示本次工作、输入输出、完成条件、模型和操作范围。独立 work.create 同样等待用户确认。工作台与总控读取同一份持久记录。
 保存工作流需至少一步。已验收工作可用完整定义、sourceWorkIds和sourceVersions保存。换输入复用创建新工作；同目标返工保留原工作和会话。工作流编辑仅影响后续使用；已创建工作保持采用的定义和输入。
 使用有界详情核对完整说明及输入输出；截断摘要仅供索引，next包含下一页请求。下游输入绑定实际结果与版本，缺少结果保持等待。外部等待保存远端引用、条件和恢复时间；恢复先核原操作。取消本地跟踪后仍保留远端引用。
 返工前查询rework影响；已有消费者时展示影响和重跑范围，等待用户确认。确认、授权、模型及检查同意、人工关卡和最终验收经用户API提交；工具入口固定agent身份。${REPORT_GUIDANCE}`;
 
 const QUERY_DESCRIPTION='查询项目、工作、工作流及内部记录。JSON {kind:work|workflow|use|workspace|intent|run|event|control|rework|bus.history|bus.display,workspaceId?,workflowId?,workId?,useId?,legacy?:false|true|"all",status?,categories?,after?,limit?}。列表以nextCursor作为after；rework需要workId。详情加detail:true、精确目标ID（workId/workflowId/useId/workspaceId/runId/intentId/eventId/controlId）、section?:顶层字段名或字段路径数组、offset?:0、limit?。详情text为所选值JSON的Unicode字符片段；按next请求全部页，拼接text后JSON.parse。revision变化须从0重读。全部输出受queryMaxBytes限制。用户说“第二项”等序号时，以 {kind:"bus.display",position:2,replyId?} 核对已发布清单和对象当前版本，再用明确 ID、当前版本提交操作。其他清单或来源不明时先澄清。';
-const COMMAND_DESCRIPTION='提交工作提案与普通业务修改，JSON {type,idempotencyKey?,expectedVersion?,...fields}。use.create:{workspaceId,definition,parameters?,model?,permissionPreset?,autoAccept?}为执行一次提案；workflow.create:{workspaceId,title,description?,knowledge?,parameters?,stages,sourceWorkIds?,sourceVersions?}保存至少一步的工作流；workflow.start:{workflowId,expectedVersion,parameters?,model?,permissionPreset?,autoAccept?}创建新提案。两者返回proposed和works:[]，等待用户在工作台确认。use.update:{useId,expectedVersion,definition?,parameters?,model?,permissionPreset?,autoAccept?}编辑待确认内容；workflow.update:{workflowId,expectedVersion,definition}只影响后续使用。definition:{title,description?,knowledge?,parameters?:[{name,description?,required?,default?}],stages:[{id,title,instructions?,scope?,dependsOn?,manualGate?,checks?,inputs?,outputs?}]}；步骤inputs为具名{kind:value,value}|{kind:parameter,path}|{kind:output,stageId,output,path?}，outputs为[{name,description?,required?}]。work.create:{workspaceId,title,description?,scope?,model?,permissionPreset?,sessionId?,dependsOn?,manualGate?,checks?,inputs?,outputs?}等待用户确认；独立工作输入采用value或{kind:result,workId,output,path?}。完成后保存需同项目已验收sourceWorkIds及精确sourceVersions。work.rework:{workId,feedback,expectedVersion}先查rework，有消费者时等待用户确认影响和重跑范围。work.pause/work.cancel/work.resume:{workId,expectedVersion?}；work.steer:{workId,text,expectedVersion}；work.setModel:{workId,model}；work.setChecks:{workId,checks}。intent.create:{text}；intent.resolve:{intentId,workspaceId,workId?|useId?}结清归属；workspace.setKnowledge/workflow.setKnowledge:{对应ID,knowledge,expectedVersion?}。确认、授权、关卡与验收由用户API提交。';
+const COMMAND_DESCRIPTION=`提交工作提案与普通业务修改，JSON {type,idempotencyKey?,expectedVersion?,...fields}。${PROPOSAL_GUIDANCE}
+use.create:{workspaceId,definition,parameters?,stageInputs?,model?,permissionPreset?,autoAccept?}为执行一次提案；workflow.start:{workflowId,expectedVersion,parameters?,stageInputs?,model?,permissionPreset?,autoAccept?}按已有工作流创建提案。两者返回{use,works:[]}，use.status 为 proposed，等待用户确认。use.update:{useId,expectedVersion,definition?,parameters?,stageInputs?,model?,permissionPreset?,autoAccept?}编辑待确认提案；stageInputs 为 [{stageId,name,value}]。
+workflow.create:{workspaceId,title,description?,knowledge?,parameters?,stages,sourceWorkIds?,sourceVersions?}保存至少一步的工作流定义，执行提案经 workflow.start 另建。完成后保存需同项目已验收 sourceWorkIds 及精确 sourceVersions。workflow.update:{workflowId,expectedVersion,definition}只影响后续使用。definition:{title,description?,knowledge?,parameters?:[{name,description?,required?,default?}],stages:[{id,title,instructions?,scope?,dependsOn?,manualGate?,checks?,inputs?,outputs?}]}；步骤 inputs 为具名{kind:value,value}|{kind:parameter,path}|{kind:output,stageId,output,path?}，outputs 为 [{name,description?,required?}]。
+work.create:{workspaceId,title,description?,scope?,model?,permissionPreset?,sessionId?,dependsOn?,manualGate?,checks?,inputs?,outputs?}创建 awaiting_model 的独立工作；输入采用 value 或 {kind:result,workId,output,path?}。work.steer:{workId,text,expectedVersion}用于正在调度或运行的工作；work.rework:{workId,feedback,expectedVersion}先查 rework，有消费者时等待用户确认影响和重跑范围。work.pause/work.cancel/work.resume:{workId,expectedVersion?}；work.setModel:{workId,model}；work.setChecks:{workId,checks}。
+intent.create:{text} 保存待澄清请求；intent.resolve:{intentId,workspaceId,workId?|useId?} 关联同项目的一个目标。workspace.setKnowledge/workflow.setKnowledge:{对应ID,knowledge,expectedVersion?}。提案确认、模型及命令检查同意、授权、关卡与验收由用户 API 提交。`;
 
 const AUTHORITY_FIELDS=new Set(['actor','authorization','modelConsent','checksConsent','confirmation']);
 function toolRequest(args,name) {
