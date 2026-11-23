@@ -33,6 +33,15 @@ dsh plugin --profile web add "/absolute/path/to/dsh-loom"
 
 本地目录安装的升级方式是更新源码、重新执行安装依赖与构建命令，再重启 Host。
 
+### 可选写作技能
+
+- `cooperative-answering`：指导总控的用户回复，以及执行报告中面向用户的表述。
+- `asd-ste100-zh`：指导总控撰写报告，以及执行报告的英文起草和中文翻译。
+
+可单独安装任意一项。将所选技能的整个目录放入 DSH 的用户技能目录，例如 `<DSH_HOME>/skills/asd-ste100-zh/SKILL.md` 或 `~/.agents/skills/cooperative-answering/SKILL.md`。技能名称以 `SKILL.md` 的 `name` 为准。重启 Host 后，Loom 在会话绑定时通过 DSH 技能注册表读取正文。
+
+Loom 采用注册表选中的用户级或宿主内置技能，要求该技能允许模型调用。缺少技能或模型调用已禁用时，相应用途沿用 Loom 内置的简明沟通与双语报告规则。写作指导适用于文案，工作操作仍按原有工具和审批流程执行。
+
 ## 日常使用
 
 1. 在协调对话中说明目标和所属工作区，例如“在网站项目中增加导出功能，并检查生成的文件”。归属待确认的请求会保存为待澄清意图。

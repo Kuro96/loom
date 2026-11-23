@@ -1,5 +1,6 @@
 import {createRequire} from 'node:module';
 import {guardAgent} from '../context/binding.mjs';
+import {loadWritingGuidance} from './writing-skills.mjs';
 const require=createRequire(import.meta.url);
 const string={type:'string',required:true};
 const optionalString={type:'string'};
@@ -30,8 +31,13 @@ export function createWorkerBinder(store) {
     gate.active=false;
     if(gate.plugin!==null && gate.owner!==owner) await gate.plugin.dispose();
     gate.owner=owner;
-    const plugin=agent.ctx.plugin({name:'loom-worker-binding',inject:['tools','systemPrompt'],apply(scoped){
+    const plugin=agent.ctx.plugin({name:'loom-worker-binding',inject:['tools','systemPrompt'],async apply(scoped){
       scoped.effect(()=>()=>{bindings.delete(agent);if(gate.owner===owner){gate.active=false;gate.owner=null;gate.plugin=null;}});
+      const closing=new AbortController();
+      scoped.effect(()=>()=>closing.abort());
+      const guidance=await loadWritingGuidance(scoped,'worker',closing.signal);
+      if(guidance) scoped.systemPrompt.context({name:'loom:writing',order:1,required:true,interpolate:false,
+        text:()=>store.getActiveRunForSession(agent.id)===null?'':guidance});
       let terminalRunId=null;
       const pending=new Map();
       scoped.tools.guard(()=>{
