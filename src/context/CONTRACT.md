@@ -80,17 +80,17 @@ bundle 通过原生启动依赖在 AgentLoop factory 就绪前加载 `dsh-loom/b
 
 | 操作 | 模型命令与结果 |
 | --- | --- |
-| 执行一次 | `use.create {workspaceId,definition,parameters?,model?,permissionPreset?,autoAccept?,idempotencyKey?}`，返回 `{use,works:[]}`；use.status 为 proposed。 |
+| 执行一次 | `use.create {workspaceId,definition,parameters?,model?,permissionPreset?,autoAccept?,reviewRequired?,idempotencyKey?}`，返回 `{use,works}`；待审阅为 proposed，按设置排队为 confirmed。 |
 | 保存为工作流并执行 | 先 `workflow.create {workspaceId,title,description?,knowledge?,parameters?,stages}`，再 `workflow.start {workflowId,expectedVersion,parameters?,model?,permissionPreset?,autoAccept?,idempotencyKey?}` 创建提案。 |
-| 再次使用 | 查询当前定义及其版本，为新输入调用 workflow.start；确认后生成新工作。workflow.start、use.create、use.update 可附 `stageInputs:[{stageId,name,value}]`，覆盖本次步骤固定值或补充材料。参数和上游输出仍按原绑定传入。 |
+| 再次使用 | 查询当前定义及其版本，为新输入调用 workflow.start；按发布策略生成工作或保存提案。workflow.start、use.create、work.create 支持 `reviewRequired:true`。workflow.start、use.create、use.update 可附 `stageInputs:[{stageId,name,value}]`；参数和上游输出仍按原绑定传入。 |
 | 修改待确认内容 | `use.update {useId,expectedVersion,definition?,parameters?,model?,permissionPreset?,autoAccept?}`；来源定义被改写时形成 inline 提案并保留来源信息。 |
 | 修改工作流 | `workflow.update {workflowId,expectedVersion,definition}` 完整替换定义；已有工作保持采用的说明与输入。 |
 | 完成后保存 | 用完整定义调用 workflow.create，并给出同项目已验收的 `sourceWorkIds` 及 `{[workId]:version}` 形状的 sourceVersions；原工作与证据保持。 |
-| 独立工作 | `work.create {workspaceId,title,description?,scope?,model?,permissionPreset?,sessionId?,dependsOn?,manualGate?,checks?,inputs?,outputs?}` 创建 awaiting_model 工作。 |
+| 独立工作 | `work.create {workspaceId,title,description?,scope?,model?,permissionPreset?,sessionId?,dependsOn?,manualGate?,checks?,inputs?,outputs?,reviewRequired?}` 返回 queued 或 awaiting_model 工作。 |
 
 定义为 `{title,description?,knowledge?,parameters?,stages}`，须含至少一步。参数为 `[{name,description?,required?,default?}]`；步骤为 `{id,title,instructions?,scope?,dependsOn?,manualGate?,checks?,inputs?,outputs?}`。具名输入支持 value、parameter 和前序步骤 output；具体工作使用 value/result 引用。输出声明为 `[{name,description?,required?}]`。完整格式及边界见 core 契约。
 
-总控先查已有说明，再补齐本次目标、输入及可用方法。提案应展示项目、工作、输入输出、完成条件、模型和操作范围，并明确等待用户确认。工作台以 `use.confirm {useId,expectedVersion}` 或 `work.confirm {workId,expectedVersion,autoAccept?}` 确认同一持久版本。用户确认同时保存模型、检查及本次权限同意；autoAccept 是本次工作授权。保存工作流只保存可复用说明。
+总控先查已有说明，再补齐本次目标、输入及可用方法。按实际回执报告下一步。工作台以 `use.confirm {useId,expectedVersion}` 或 `work.confirm {workId,expectedVersion,autoAccept?}` 确认待审阅版本。用户确认保存模型、检查及本次权限同意。宿主自动排队由当前总控身份与保存的设置产生，记录 `host/bus-auto-start` 来源；命令检查、显式人工关卡和需用户决定的验收沿用原入口。
 
 ### 有界查询与完整详情
 

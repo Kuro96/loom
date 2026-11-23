@@ -48,6 +48,17 @@ async function mount(t, roleModels = roles) {
   return { renderer, store, props, commands, select, change, save };
 }
 
+test('automatic execution after bus publication defaults on and saves through settings', async t => {
+  const view = await mount(t), label = '总控发布后自动执行';
+  assert.equal(view.store.getSettings().busAutoStart, true);
+  assert.equal(view.select(label).props.checked, true);
+  await act(async () => view.select(label).props.onChange({ target: { checked: false } }));
+  await view.save();
+  assert.equal(view.commands.at(-1).busAutoStart, false);
+  assert.equal(view.store.getSettings().busAutoStart, false);
+  assert.equal(view.select(label).props.checked, false);
+});
+
 test('default model change preserves distinct roles and their visible override summary', async t => {
   const worker = { provider: 'other', model: 'worker', reasoningEffort: 'low' };
   const view = await mount(t, { ...roles, worker });

@@ -29,7 +29,8 @@ export class LoomEngine {
       if(work===null || ['accepted','cancelled','failed'].includes(work.status)) return next();
       if(['pause_requested','paused','cancel_requested','waiting'].includes(work.status)) return {kind:'reject'};
       const consent=work.modelConsent;
-      const approved=work.model!==null && consent!==null && consent.actor.kind==='user' &&
+      const approved=work.model!==null && consent!==null && (consent.actor.kind==='user' ||
+        consent.actor.kind==='host' && consent.actor.source==='bus-auto-start') &&
         consent.modelRevision===work.modelRevision && sameModel(consent.model,work.model) && sameModel(payload.modelSelection,work.model);
       if(!approved) {
         if(['dispatching','running'].includes(work.status)) {
@@ -76,13 +77,23 @@ export class LoomEngine {
       if(input.permissionPreset!==undefined) this.validatePermission(input.permissionPreset);
       if(input.roleModels) for(const model of Object.values(input.roleModels)) if(model!==null) await this.native.validateModel(model);
     }
-    let request=input;
-    if(['work.create','workflow.start','use.create'].includes(input.type) && input.model===undefined) {
+    let request=input,busLaunch;
+    if(['work.create','workflow.start','use.create'].includes(input.type)) {
       const settings=this.store.getSettings();
-      const model=settings.roleModels.worker ?? (await this.native.modelCatalog()).default;
-      request={...input,model};
+      const sessionId=actor.kind==='agent' ? this.context.getBus()?.sessionId : undefined;
+      const isBus=sessionId!==undefined && actor.sessionId===sessionId;
+      const automatic=isBus && settings.busAutoStart && input.reviewRequired!==true;
+      const catalog=(automatic || input.model===undefined && settings.roleModels.worker===null) ? await this.native.modelCatalog() : null;
+      const model=settings.roleModels.worker ?? catalog?.default ?? null;
+      if(input.model===undefined) request={...input,model};
+      const permissionPreset=settings.permissionPreset ?? 'workspace-write';
+      if(automatic && this.context.getBus()?.sessionId===sessionId && model!==null && catalog.groups.some(group=>group.id===model.provider &&
+        group.models.some(option=>option.id===model.model && (model.reasoningEffort===undefined || option.reasoning?.efforts.some(effort=>effort.id===model.reasoningEffort)))) &&
+        ['workspace-write','read-only'].includes(permissionPreset) && this.ctx.permissionPresets.catalog().defaultOptions.some(item=>item.value===permissionPreset)) {
+        busLaunch={sessionId,settingsVersion:settings.version,model,permissionPreset};
+      }
     }
-    const result=this.store.command(request,actor,{identityInput:input});
+    const result=this.store.command(request,actor,{identityInput:input,busLaunch});
     if(['work.pause','work.cancel'].includes(input.type)) {
       for(const task of this.verifications.values()) if(task.workId===input.workId) task.controller.abort();
     }

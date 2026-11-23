@@ -48,14 +48,14 @@ Workflow 的运行进度由 use 中的 Work 派生。定义更新作用于后续
 | --- | --- |
 | workflow.create | `{workspaceId,title,description?,knowledge?,parameters?,stages,sourceWorkIds?,sourceVersions?}`。来源 Work 须同项目、已验收且版本一致；sourceVersions 为 `{[workId]:version}`，定义由调用者完整提供。 |
 | workflow.update | `{workflowId,expectedVersion,definition}`，完整替换定义并递增版本。 |
-| workflow.start | `{workflowId,expectedVersion,parameters?,stageInputs?,model?,permissionPreset?,autoAccept?}`，保存 proposed use，works 为 []。 |
-| use.create | `{workspaceId,definition,parameters?,stageInputs?,model?,permissionPreset?,autoAccept?}`，保存临时提案，workflowId 为 null。 |
+| workflow.start | `{workflowId,expectedVersion,parameters?,stageInputs?,model?,permissionPreset?,autoAccept?,reviewRequired?}`，返回 `{use,works}`；待确认时 works 为 `[]`。 |
+| use.create | `{workspaceId,definition,parameters?,stageInputs?,model?,permissionPreset?,autoAccept?,reviewRequired?}`，临时定义的 workflowId 为 null；发布结果同上。 |
 | use.update | `{useId,expectedVersion,definition?,parameters?,stageInputs?,model?,permissionPreset?,autoAccept?}`，仅 proposed 可修改。提交完整 definition 时转为 inline，保留 sourceWorkflowId/sourceWorkflowVersion。 |
 | use.confirm | `{useId,expectedVersion}`，仅用户；确认当前提案，原子生成全部工作及精确同意。重复原 proposalVersion 返回同组工作，其他版本冲突。人工关卡保持。 |
 | use.cancel | `{useId,expectedVersion}`，仅用户。仅 proposed 可取消，返回含 progress 的 cancelled 提案，保留快照，版本递增，工作数为零。 |
 | use.delete | `{useId,expectedVersion}`，仅用户。删除尚未生成工作的 proposed 或 cancelled 提案，返回 `{id,deleted:true}`。 |
 | work.delete | `{workId,expectedVersion}`，仅用户。删除指定的具体工作及其 Loom 报告正文、运行和控制记录，返回 `{id,deleted:true}`。 |
-| work.create | `{workspaceId,title,description?,scope?,model?,permissionPreset?,workflowId?,sessionId?,dependsOn?,manualGate?,checks?,inputs?,outputs?}`，创建 awaiting_model 工作。 |
+| work.create | `{workspaceId,title,description?,scope?,model?,permissionPreset?,workflowId?,sessionId?,dependsOn?,manualGate?,checks?,inputs?,outputs?,reviewRequired?}`，创建 queued 或 awaiting_model 工作。 |
 | work.confirm | `{workId,expectedVersion,autoAccept?}`，仅用户；一次确认当前模型、检查、权限及自动验收。 |
 | work.authorize | `{workId,expectedVersion,autoAccept}`，仅用户；更新具体工作授权，影响尚未完成的执行及后续返工。 |
 | use.authorize | `{useId,expectedVersion,autoAccept}`，仅用户；批量更新该次使用的具体工作授权，confirmation 历史保持。 |
@@ -64,7 +64,7 @@ Workflow 的运行进度由 use 中的 Work 派生。定义更新作用于后续
 | intent.resolve | `{intentId,workspaceId,workId?,useId?}`，以一个同项目的既有目标结清请求。已选项目须与目标一致；同目标重复结清保持原值。 |
 | workspace.setKnowledge | `{workspaceId,knowledge,expectedVersion?}`，更新项目知识。 |
 | workflow.setKnowledge | `{workflowId,knowledge,expectedVersion?}`，兼容的定义知识编辑入口；legacy 来源只读。 |
-| settings.update | `{roleModels?,context?,permissionPreset?,expectedVersion?}`，仅用户，按字段合并设置。 |
+| settings.update | `{roleModels?,context?,permissionPreset?,busAutoStart?,expectedVersion?}`，仅用户，按字段合并设置。 |
 
 `stageInputs` 按 `(stageId,name)` 修改本次使用的步骤输入。例如 `stageInputs:[{stageId:'upload',name:'manifest',value:['批次A.csv']}]` 会在 `use.definitionSnapshot` 的 upload 步骤新增或替换静态值 `manifest`。省略的输入保持原值；`value:null` 表示显式空值。参数引用通过 `parameters` 修改，上游输出引用由依赖工作提供。仅修改本次输入时保留 `workflowId/workflowVersion`；与完整 `definition` 同时提交时，先采用新定义，再应用覆盖。
 
@@ -72,7 +72,7 @@ Workflow 的运行进度由 use 中的 Work 派生。定义更新作用于后续
 
 模型为 `{provider,model,reasoningEffort?}`。模型与权限在提案/Work 创建时解析：模型缺省使用 worker 设置，权限缺省使用当前设置，显式 null 表示沿用原生权限。autoAccept 默认 false。Host 确认前核对选择仍可用。新 Work.permissionPreset 冻结，Run 沿用该值；设置变更作用于新建对象。
 
-use.confirmation 为 `{actor,at,proposalVersion}`。Work.authorization 保存用户来源、时间及授权时 Work 版本。确认同时创建精确 modelConsent/checksConsent。新 workflow.authorize 请求返回 MIGRATION_REQUIRED；历史幂等请求仍返回原响应。
+use.confirmation 为 `{actor,at,proposalVersion}`。用户确认同时创建精确 modelConsent/checksConsent。`busAutoStart` 默认开启。Host 只为当前总控的发布请求提供对应设置版本和模型、项目权限；权限为 null 时自动路径使用 `workspace-write`。Store 在同一事务核对设置版本，记录 `host/bus-auto-start` 来源，按条件直接生成工作；命令检查、关联已有会话、不同模型或权限、显式先审阅等情况走原确认路径。自动批次的中间交接须有必需输出或客观检查，交接产出齐备、检查及预验收通过且没有用户交付文件时才自动验收。新 workflow.authorize 请求返回 MIGRATION_REQUIRED；历史幂等请求仍返回原响应。
 
 所有命令支持 idempotencyKey。同键、原始请求及 actor 返回首次结果快照，内容或身份不同为 CONFLICT；对象键顺序保持等价。identityInput 用于 Host 补默认值前的原请求。`replayCommand(input,actor)` 返回旧结果或 undefined；Host 可先重放，再检查原生状态和提交，写事务会再次检查。更新/确认/授权/干预使用当前 expectedVersion。
 

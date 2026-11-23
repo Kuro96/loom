@@ -5,9 +5,15 @@ import { isUserCleanupCommand, definitionSchema, parameterValues, readPath, chec
 
 const tables = {work:'works',workflow:'workflows',run:'runs',event:'events',intent:'intents',workspace:'workspaces',control:'controls',use:'uses'};
 const activeRunSQL = "('dispatching','accepted','running','pause_requested','cancel_requested')";
+const launchAuthoritySQL = body => `(json_extract(${body},'$.modelConsent.actor.kind')='user' OR (
+  json_extract(${body},'$.modelConsent.actor.kind')='host' AND json_extract(${body},'$.modelConsent.actor.source')='bus-auto-start'))`;
 const readySQL = `w.status='queued'
   AND json_extract(w.body,'$.modelConsent.modelRevision')=json_extract(w.body,'$.modelRevision')
-  AND json_extract(w.body,'$.modelConsent.actor.kind')='user'
+  AND ${launchAuthoritySQL('w.body')}
+  AND (json_extract(w.body,'$.modelConsent.actor.kind')='user' OR NOT EXISTS (
+    SELECT 1 FROM json_each(w.body,'$.checks') c WHERE c.value->>'kind'='command' AND (
+      json_extract(w.body,'$.checksConsent.actor.kind') IS NOT 'user' OR
+      json_extract(w.body,'$.checksConsent.checksRevision') IS NOT json_extract(w.body,'$.checksRevision'))))
   AND COALESCE(json_extract(w.body,'$.gate.required'),0)<=COALESCE(json_extract(w.body,'$.gate.released'),0)
   AND EXISTS(SELECT 1 FROM workspaces s WHERE s.id=w.workspaceId AND json_extract(s.body,'$.active')=1)
   AND NOT EXISTS(SELECT 1 FROM json_each(w.body,'$.dependsOn') d
@@ -23,7 +29,7 @@ const nativeDecisionSQL=`(SELECT CASE
 const workDecisionSQL=`CASE
   WHEN status='awaiting_model' THEN 'execution'
   WHEN status IN ('queued','paused') AND (
-    json_extract(body,'$.modelConsent.actor.kind') IS NOT 'user'
+    ${launchAuthoritySQL('body')} IS NOT TRUE
     OR json_extract(body,'$.modelConsent.modelRevision') IS NOT json_extract(body,'$.modelRevision')
     OR (EXISTS(SELECT 1 FROM json_each(works.body,'$.checks') c WHERE json_extract(c.value,'$.kind')='command')
       AND (json_extract(body,'$.checksConsent.actor.kind') IS NOT 'user'
@@ -251,7 +257,9 @@ export class LoomStore {
       work.status=reason==='completed'?'review':'failed';
       work.result={runId,reason,summary,checks,review,outputs,deliverables,version:run.resultVersion,acceptance:null};
       run.verificationPassed=reason==='completed' && hasReviewEvidence(review) && checksPassed(run,checks) && this.#outputsComplete(work,outputs);
-      if(work.authorization?.actor.kind==='user' && work.authorization.autoAccept && run.verificationPassed) {
+      const authorization=work.authorization;
+      const automaticHandoff=authorization?.actor.kind==='host' && authorization.actor.source==='bus-auto-start' && deliverables.length===0;
+      if(authorization?.autoAccept && (authorization.actor.kind==='user' || automaticHandoff) && run.verificationPassed) {
         work.status='accepted';
         work.result.acceptance={mode:'work',actor:work.authorization.actor,authorization:work.authorization,
           at:now(),runId,workVersion:work.version,resultVersion:work.result.version};
@@ -499,7 +507,7 @@ export class LoomStore {
   getRun(id) { return this.#get('run',id); }
   #settings() {
     const row=this.#db.prepare('SELECT body FROM settings WHERE id=1').get();
-    return row?{permissionPreset:null,...JSON.parse(row.body)}:{version:0,permissionPreset:null,roleModels:{bus:null,review:null,worker:null,acceptance:null},context:{debug:false}};
+    return row?{permissionPreset:null,busAutoStart:true,...JSON.parse(row.body)}:{version:0,permissionPreset:null,busAutoStart:true,roleModels:{bus:null,review:null,worker:null,acceptance:null},context:{debug:false}};
   }
   getSettings() {
     const settings=this.#settings();
@@ -577,7 +585,7 @@ export class LoomStore {
   replayCommand(input,actor) {
     return this.#replayCommand(this.#commandIdentity(input,actor));
   }
-  command(effectiveInput,actor,{identityInput=effectiveInput,coordinatorSessionId}={}) {
+  command(effectiveInput,actor,{identityInput=effectiveInput,coordinatorSessionId,busLaunch}={}) {
     const identity=this.#commandIdentity(identityInput,actor,coordinatorSessionId), input=effectiveInput;
     requireValue(input && typeof input==='object','命令格式错误');
     requireValue(input.type===identityInput.type,'命令类型与原始请求不符');
@@ -585,7 +593,7 @@ export class LoomStore {
     return this.#transaction(()=>{
       const previous=this.#replayCommand(identity);
       if(previous!==undefined) return previous;
-      const value=this.#execute(input,actor),target=value.use??value.workflow??value;
+      const value=this.#execute(input,actor,busLaunch),target=value.use??value.workflow??value;
       const deleted=input.type==='use.delete' || input.type==='work.delete';
       const result=deleted?{id:target.id,deleted:true}:value;
       if(deleted) this.#event(input.type,target,actor,{version:target.version});
@@ -671,12 +679,38 @@ export class LoomStore {
   #confirmWork(work,actor,autoAccept) {
     requireValue(work.model,'须选择本次模型');
     work.modelConsent={modelRevision:work.modelRevision,model:work.model,actor,at:now()};
-    work.checksConsent={checksRevision:work.checksRevision,checks:work.checks,checksHash:createHash('sha256').update(JSON.stringify(work.checks)).digest('hex'),actor,at:now()};
+    if(actor.kind==='user') work.checksConsent={checksRevision:work.checksRevision,checks:work.checks,checksHash:createHash('sha256').update(JSON.stringify(work.checks)).digest('hex'),actor,at:now()};
     work.authorization={autoAccept,actor,at:now(),workVersion:work.version,permissionPreset:work.permissionPreset};
     if(work.status!=='paused') work.status='queued';
   }
-  #execute(input, actor) {
+  #materializeUse(use,actor,timestamp) {
+    const definition=use.definitionSnapshot,ids=new Map(definition.stages.map(stage=>[stage.id,randomUUID()]));
+    const dependencies=new Set(definition.stages.flatMap(stage=>stage.dependsOn));
+    const works=definition.stages.map(stage=>{
+      const inputs=Object.fromEntries(Object.entries(stage.inputs).map(([name,ref])=>[name,ref.kind==='value'?ref:ref.kind==='parameter'?
+        {kind:'value',value:readPath(use.parameters,ref.path).value}:{kind:'result',workId:ids.get(ref.stageId),output:ref.output,path:ref.path}]));
+      const work=this.#newWork({workspaceId:use.workspaceId,workflowId:use.workflowId,title:stage.title,description:stage.instructions,
+        scope:stage.scope,model:use.execution.model,permissionPreset:use.execution.permissionPreset,checks:stage.checks,inputs,outputs:stage.outputs,manualGate:stage.manualGate});
+      work.id=ids.get(stage.id);work.useId=use.id;work.stageId=stage.id;
+      work.definitionSnapshot={description:definition.description,knowledge:definition.knowledge};
+      work.dependsOn=stage.dependsOn.map(id=>ids.get(id));
+      const verifiedHandoff=actor.kind==='host' && dependencies.has(stage.id) && (stage.outputs.some(output=>output.required) || stage.checks.length>0);
+      this.#confirmWork(work,actor,use.execution.autoAccept || verifiedHandoff);this.#put('work',work);
+      this.#event('work.create',work,actor,{version:work.version});return work;
+    });
+    use.confirmation={actor,at:timestamp,proposalVersion:use.version};use.status='confirmed';use.version++;use.updatedAt=timestamp;
+    use.workIds=works.map(w=>w.id);use.stageWorkIds=Object.fromEntries(ids);this.#put('use',use);
+    return {use:this.#useProgress(use),works};
+  }
+  #autoStart(input,actor,launch,execution,checks) {
+    if(!launch || actor.kind!=='agent' || actor.sessionId!==launch.sessionId || input.reviewRequired===true || input.sessionId || execution.autoAccept || checks.some(check=>check.kind==='command')) return null;
+    const settings=this.#settings();
+    if(!settings.busAutoStart || settings.version!==launch.settingsVersion || execution.model===null || fingerprint(execution.model)!==fingerprint(launch.model) || execution.permissionPreset!==settings.permissionPreset) return null;
+    return {kind:'host',source:'bus-auto-start',sessionId:actor.sessionId,settingsVersion:settings.version};
+  }
+  #execute(input, actor, busLaunch) {
     const timestamp=now();
+    if(input.reviewRequired!==undefined) requireValue(typeof input.reviewRequired==='boolean','先审阅须为布尔值');
     if(input.type==='work.addReport') {
       bounded(input);
       requireValue(Object.keys(input).every(k=>['type','workId','runId','expectedVersion','idempotencyKey','title','document'].includes(k)),'补充报告格式错误');
@@ -697,6 +731,10 @@ export class LoomStore {
     if(input.type==='settings.update') {
       requireValue(actor.kind==='user','设置须由用户修改','FORBIDDEN');
       const settings=this.#settings(); this.#version(settings,input);
+      if(input.busAutoStart!==undefined) {
+        requireValue(typeof input.busAutoStart==='boolean','总控发布后自动执行须为布尔值');
+        settings.busAutoStart=input.busAutoStart;
+      }
       if(input.permissionPreset!==undefined) {
         settings.permissionPreset=input.permissionPreset===null?null:text(input.permissionPreset,'执行权限预设');
       }
@@ -771,6 +809,11 @@ export class LoomStore {
       const use={id:randomUUID(),workspaceId,workflowId:workflow?.id??null,workflowVersion:workflow?.version??null,
         version:1,status:'proposed',definitionSnapshot:definition,parameters:parameterValues(definition,input.parameters),
         execution:this.#execution(input),confirmation:null,workIds:[],stageWorkIds:{},createdAt:timestamp,updatedAt:timestamp};
+      const launch=this.#autoStart(input,actor,busLaunch,use.execution,definition.stages.flatMap(stage=>stage.checks));
+      if(launch) {
+        use.execution.permissionPreset=busLaunch.permissionPreset;
+        return this.#materializeUse(use,launch,timestamp);
+      }
       this.#put('use',use);return {use:this.#useProgress(use),works:[]};
     }
     if(['use.cancel','use.delete'].includes(input.type)) {
@@ -805,21 +848,7 @@ export class LoomStore {
       this.#version(use,input,true);
       requireValue(use.status==='proposed','仅待确认提案可确认','INVALID_STATE');this.#workspace(use.workspaceId);
       requireValue(use.execution.model,'须选择本次模型','INVALID_INPUT');
-      const definition=use.definitionSnapshot,ids=new Map(definition.stages.map(stage=>[stage.id,randomUUID()]));
-      const works=definition.stages.map(stage=>{
-        const inputs=Object.fromEntries(Object.entries(stage.inputs).map(([name,ref])=>[name,ref.kind==='value'?ref:ref.kind==='parameter'?
-          {kind:'value',value:readPath(use.parameters,ref.path).value}:{kind:'result',workId:ids.get(ref.stageId),output:ref.output,path:ref.path}]));
-        const work=this.#newWork({workspaceId:use.workspaceId,workflowId:use.workflowId,title:stage.title,description:stage.instructions,
-          scope:stage.scope,model:use.execution.model,permissionPreset:use.execution.permissionPreset,checks:stage.checks,inputs,outputs:stage.outputs,manualGate:stage.manualGate});
-        work.id=ids.get(stage.id);work.useId=use.id;work.stageId=stage.id;
-        work.definitionSnapshot={description:definition.description,knowledge:definition.knowledge};
-        work.dependsOn=stage.dependsOn.map(id=>ids.get(id));
-        this.#confirmWork(work,actor,use.execution.autoAccept);this.#put('work',work);
-        this.#event('work.create',work,actor,{version:work.version});return work;
-      });
-      use.confirmation={actor,at:timestamp,proposalVersion:use.version};use.status='confirmed';use.version++;use.updatedAt=timestamp;
-      use.workIds=works.map(w=>w.id);use.stageWorkIds=Object.fromEntries(ids);this.#put('use',use);
-      return {use:this.#useProgress(use),works};
+      return this.#materializeUse(use,actor,timestamp);
     }
     if(['work.confirm','work.authorize','use.authorize'].includes(input.type)) {
       requireValue(actor.kind==='user','工作授权须由用户确认','FORBIDDEN');
@@ -876,6 +905,11 @@ export class LoomStore {
         if(!work.dependsOn.includes(ref.workId)) work.dependsOn.push(ref.workId);
       }
       if(work.workflowId) {const workflow=this.#required('workflow',work.workflowId);work.definitionSnapshot={description:workflow.description,knowledge:workflow.knowledge};}
+      const launch=this.#autoStart(input,actor,busLaunch,{model:work.model,permissionPreset:work.permissionPreset,autoAccept:false},work.checks);
+      if(launch) {
+        work.permissionPreset=busLaunch.permissionPreset;
+        this.#confirmWork(work,launch,false);
+      }
       return this.#put('work',work);
     }
     if(['work.setModel','work.approveModel'].includes(input.type)) {

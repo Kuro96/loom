@@ -222,11 +222,12 @@ export function SettingsPanel({ settings, catalog, catalogError, reloadModels, e
   const formId = useId();
   const [current, setCurrent] = useState(settings), [models, setModels] = useState(settings.roleModels);
   const [preset, setPreset] = useState(settings.permissionPreset), [debug, setDebug] = useState(Boolean(settings.context.debug));
+  const [busAutoStart, setBusAutoStart] = useState(settings.busAutoStart);
   const [permissions, setPermissions] = useState(null), [permissionError, setPermissionError] = useState(null), [reload, setReload] = useState(0);
   const [diagnostics, setDiagnostics] = useState(false);
   const [error, setError] = useState(null), [saved, setSaved] = useState(''), [busy, setBusy] = useState(false);
-  function readback(value) { setCurrent(value); setModels(value.roleModels); setPreset(value.permissionPreset); setDebug(Boolean(value.context.debug)); }
-  const dirty = JSON.stringify(models) !== JSON.stringify(current.roleModels) || preset !== current.permissionPreset || debug !== Boolean(current.context.debug);
+  function readback(value) { setCurrent(value); setModels(value.roleModels); setPreset(value.permissionPreset); setDebug(Boolean(value.context.debug)); setBusAutoStart(value.busAutoStart); }
+  const dirty = JSON.stringify(models) !== JSON.stringify(current.roleModels) || preset !== current.permissionPreset || debug !== Boolean(current.context.debug) || busAutoStart !== current.busAutoStart;
   useEffect(() => {
     if (!dirty && !busy && settings.version > current.version) readback(settings);
   }, [settings.version, dirty, busy, current.version]);
@@ -243,6 +244,7 @@ export function SettingsPanel({ settings, catalog, catalogError, reloadModels, e
     event.preventDefault(); setBusy(true); setError(null); setSaved('');
     const payload = { roleModels: changedModels,
       ...(preset !== current.permissionPreset ? { permissionPreset: preset } : {}),
+      ...(busAutoStart !== current.busAutoStart ? { busAutoStart } : {}),
       ...(debug !== Boolean(current.context.debug) ? { context: { debug } } : {}) };
     try { await saveSettings(execute, api, payload, current.version, readback); setSaved('设置已保存。'); }
     catch (reason) { setError(reason); }
@@ -268,6 +270,8 @@ export function SettingsPanel({ settings, catalog, catalogError, reloadModels, e
       </select></Field>
       {!permissions && !permissionError && <p className="loom-setting-hint" role="status">正在加载权限选项…</p>}
       {preset === 'danger-full-access' && <p className="loom-setting-hint">允许完整文件访问和命令执行。</p>}
+      <label className="loom-setting-row"><span className="loom-setting-label">总控发布后自动执行</span><input className="loom-setting-control" aria-label="总控发布后自动执行" type="checkbox" checked={busAutoStart ?? true} disabled={busy} onChange={event => { setBusAutoStart(event.target.checked); setSaved(''); }} /></label>
+      <p className="loom-setting-hint">新工作按默认模型和项目权限排队，中间交接核对通过后继续。命令检查、人工关卡及最终验收保留各自的确认入口。</p>
     </section>
     <details className="loom-advanced" ref={scrollOnSettingsToggle} onToggle={event => setDiagnostics(event.currentTarget.open)}><summary>高级与诊断{debug ? ' · 调试记录已开启' : ''}</summary>
       <label className="loom-setting-row"><span className="loom-setting-label">调试记录</span><input className="loom-setting-control" aria-label="调试记录" type="checkbox" checked={debug} disabled={busy} onChange={event => { setDebug(event.target.checked); setSaved(''); }} /></label>

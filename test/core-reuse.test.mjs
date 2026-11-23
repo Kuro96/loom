@@ -128,6 +128,26 @@ function result(s,w,outputs={},extra={}) {
   return s.finishRun(run.id,{reason:'completed',summary:'native text',eventCursor:2,reportCallId:'report',review,...extra});
 }
 
+test('a verified internal handoff releases its successor while its final result remains for review',t=>{
+  const {store:s}=fixture(t);
+  const settings=s.command({type:'settings.update',permissionPreset:'workspace-write'},user);
+  const launch={sessionId:agent.sessionId,settingsVersion:settings.version,model,permissionPreset:'workspace-write'};
+  const {works:[prepare,deliver]}=s.command({type:'use.create',workspaceId:'a',definition:{title:'Batch',stages:[
+    {id:'prepare',title:'Prepare',outputs:[{name:'artifact',required:true}]},
+    {id:'deliver',title:'Deliver',inputs:{artifact:{kind:'output',stageId:'prepare',output:'artifact',path:[]}}},
+  ]}},agent,{busLaunch:launch});
+  const first=result(s,prepare,{});
+  assert.equal(first.verificationPassed,false);
+  assert.equal(s.getWork(prepare.id).status,'review');
+  assert.throws(()=>s.reserveRun(deliver.id),{code:'NOT_READY'});
+  s.command({type:'work.rework',workId:prepare.id,feedback:'补齐交接材料'},user);
+  result(s,prepare,{artifact:'batch-A'});
+  assert.equal(s.getWork(prepare.id).result.acceptance.actor.source,'bus-auto-start');
+  const final=result(s,deliver);
+  assert.deepEqual(final.inputs,{artifact:'batch-A'});
+  assert.equal(s.getWork(deliver.id).status,'review');
+});
+
 test('result versions bind named inputs and immutable definition knowledge across reopen',t=>{
   const f=fixture(t);let s=f.store;
   const wf=s.command({type:'workflow.create',workspaceId:'a',...definition},user);
