@@ -81,9 +81,10 @@ export class LoomStore {
   #db;
   constructor(file) {
     this.#db=new DatabaseSync(file);
-    this.#db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     let initialized=false;
-    try {this.#transaction(()=>{
+    try {
+      this.#db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;');
+      this.#transaction(()=>{
     this.#db.exec(`CREATE TABLE IF NOT EXISTS commands(key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS work_documents(id TEXT PRIMARY KEY,workId TEXT NOT NULL REFERENCES works(id),body TEXT NOT NULL);`);
