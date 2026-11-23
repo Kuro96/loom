@@ -2,6 +2,18 @@
 
 DeepSeek Harness 的跨工作区工作协调插件。在 **Loom 工作台** 中安排工作、查看执行进度和验收结果，通过原生会话继续讨论、查看工具调用并处理审批。
 
+## 界面示例
+
+**工作台 · 核对本次工作**。从左侧「待处理」打开提案，查看本批输入、产出和放行条件，再确认执行。
+
+![Loom 工作台左侧显示待处理工作，右侧核对第 12 批文档发布准备的两个步骤](docs/images/workbench.png)
+
+**从手册创建 · 核对草稿**。按你的工作清单检查生成的步骤、交接、手册依据和放行方式，再编辑并保存为模板。
+
+![手册草稿展示发布清单的前置工作、人工放行和手册原文引用](docs/images/manual-workflow.png)
+
+以上截图使用虚构项目和批次。
+
 ## 安装与启用
 
 需要 **Node.js 24 或更高版本**，以及 **DSH 0.2.2-rc.3**。在插件源码目录执行：
@@ -91,4 +103,4 @@ npm test
 npm run build
 ```
 
-接口与接入机制见源码中的 `src/core/README.md` 和 `src/context/CONTRACT.md`。
+接口与接入机制见源码中的 `src/core/README.md` 和 `src/context/CONTRACT.md`。界面改动见[离线方案预览流程](docs/ui-preview.md)。
