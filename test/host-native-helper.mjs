@@ -18,7 +18,7 @@ export async function deadline(promise,label,ms=5000) {
 }
 export async function startupHost(respond=(_wire,_req,res)=>{res.writeHead(418);res.end('startup transport probe');}, modelOptions={}) {
   const host=await nativeHost(),received=[];
-  const server=createServer(async(req,res)=>{let body='';for await(const part of req)body+=part;const wire=JSON.parse(body);received.push(wire);await respond(wire,req,res);});
+  const server=createServer(async(req,res)=>{req.setEncoding('utf8');let body='';for await(const part of req)body+=part;const wire=JSON.parse(body);received.push(wire);await respond(wire,req,res);});
   server.listen(0,'127.0.0.1');await once(server,'listening');
   const add=async(name,config={})=>{const mod=native(name);return deadline(host.root.plugin(mod.default??mod,config).await(),`load ${name}`);};
   try {

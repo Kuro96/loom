@@ -25,7 +25,7 @@ async function runInput(t,{text,focus,retry=false,focusBytes}) {
   const incoming=native('dsh-llm').createUserMessage({source:{kind:'user'},content:[{type:'text',text}]});
   if(retry) persisted.setPending([incoming],{code:'LOOM_ADMISSION_REJECTED',retryable:true});
   const server=createServer(async(req,res)=>{
-    let body='';for await(const part of req)body+=part;
+    let body='';for await(const part of req.setEncoding('utf8'))body+=part;
     received.push(JSON.parse(body));res.writeHead(418);res.end('local transport boundary');
   });
   server.listen(0,'127.0.0.1');await once(server,'listening');let manager;
@@ -39,7 +39,7 @@ async function runInput(t,{text,focus,retry=false,focusBytes}) {
   const admitted=agent.session.deriveMessages().filter(message=>message.id===incoming.id);
   assert.deepEqual(admitted,[incoming]);
   assert.equal(after.pending(),null);
-  const wireTexts=received[0].messages.filter(message=>message.role==='user').flatMap(message=>typeof message.content==='string'?[message.content]:message.content.filter(block=>block.type==='text').map(block=>block.text));
+  const wireTexts=received[0].messages.filter(message=>message.role==='user').map(message=>typeof message.content==='string'?message.content:message.content.filter(block=>block.type==='text').map(block=>block.text).join(''));
   assert.equal(wireTexts.filter(value=>value===text).length,1);
   assert.ok(jsonBytes(after.value.focus)<=8000);
   for(const key of ['constraints','references']) assert.deepEqual(after.value.focus[key],before[key]);
