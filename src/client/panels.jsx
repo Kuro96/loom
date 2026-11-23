@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { applyDefaultModel, blockingReasons, createCommandMemo, saveSettings } from './state.mjs';
 import { Badge, ErrorNotice, Field, InlinePage, Json, ModelPicker } from './components.jsx';
 import { UsagePanel } from './usage-panel.jsx';
@@ -198,11 +198,31 @@ export { WorkflowDetail } from './workflow-panels.jsx';
 
 const roleNames = { bus: '协调', review: '上下文回顾', worker: '工作执行', acceptance: '结果预验收' };
 const permissionNames = { 'danger-full-access': '完全权限', 'workspace-write': '项目读写', 'read-only': '只读' };
+function revealSettingsDisclosure(details) {
+  const body = details.closest('.loom-page-body');
+  const { top, bottom } = body.getBoundingClientRect();
+  const headingTop = details.firstElementChild.getBoundingClientRect().top;
+  const firstControlBottom = details.querySelector('select, input').getBoundingClientRect().bottom;
+  // Reserve room for the focus ring; in a very short page, favor the summary.
+  const before = headingTop - (top + 6);
+  const after = firstControlBottom - (bottom - 6);
+  const delta = before < 0 ? before : Math.min(before, Math.max(0, after));
+  if (delta) body.scrollTop += delta;
+}
+
+function scrollOnSettingsToggle(details) {
+  if (!details) return;
+  // Bind the native toggle so nested diagnostic disclosures keep their position.
+  function toggle() { if (details.open) revealSettingsDisclosure(details); }
+  details.addEventListener('toggle', toggle);
+  return () => details.removeEventListener('toggle', toggle);
+}
+
 export function SettingsPanel({ settings, catalog, catalogError, reloadModels, execute, api, status, onTick, onClose }) {
+  const formId = useId();
   const [current, setCurrent] = useState(settings), [models, setModels] = useState(settings.roleModels);
   const [preset, setPreset] = useState(settings.permissionPreset), [debug, setDebug] = useState(Boolean(settings.context.debug));
   const [permissions, setPermissions] = useState(null), [permissionError, setPermissionError] = useState(null), [reload, setReload] = useState(0);
-  const [advanced, setAdvanced] = useState(false);
   const [diagnostics, setDiagnostics] = useState(false);
   const [error, setError] = useState(null), [saved, setSaved] = useState(''), [busy, setBusy] = useState(false);
   function readback(value) { setCurrent(value); setModels(value.roleModels); setPreset(value.permissionPreset); setDebug(Boolean(value.context.debug)); }
@@ -229,12 +249,13 @@ export function SettingsPanel({ settings, catalog, catalogError, reloadModels, e
     finally { setBusy(false); }
   }
   const overrides = Object.entries(roleNames).filter(([role]) => role !== 'bus' && models[role] && JSON.stringify(models[role]) !== JSON.stringify(models.bus));
-  return <InlinePage title="设置" onBack={onClose} busy={busy}><form className="loom-settings" aria-label="Loom 设置" onSubmit={save}>
+  const footer = <footer className="loom-settings-save"><button className="loom-primary" type="submit" form={formId} disabled={busy || invalidPermission}>{busy ? '保存中…' : '保存设置'}</button></footer>;
+  return <InlinePage title="设置" onBack={onClose} busy={busy} footer={footer}><form id={formId} className="loom-settings" aria-label="Loom 设置" onSubmit={save}>
     <ErrorNotice error={error} /><ErrorNotice error={catalogError} onRetry={reloadModels} />
     {saved && <p className="loom-success" role="status">{saved}</p>}
     <section className="loom-settings-section">
       <ModelPicker label="默认模型" value={models.bus} catalog={catalog} disabled={busy} onChange={value => { setModels(previous => applyDefaultModel(previous, value, catalog)); setSaved(''); }} />
-      <details className="loom-advanced" aria-label="分角色模型" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}><summary>分角色模型{overrides.length > 0 ? ` · 已单独配置：${overrides.map(([, name]) => name).join('、')}` : ''}</summary>
+      <details className="loom-advanced" aria-label="分角色模型" ref={scrollOnSettingsToggle}><summary>分角色模型{overrides.length > 0 ? ` · 已单独配置：${overrides.map(([, name]) => name).join('、')}` : ''}</summary>
         {Object.entries(roleNames).map(([role, title]) => <div className="loom-setting-row" key={role}><ModelPicker label={title} disabled={busy} value={models[role]} catalog={catalog} onChange={value => { setModels(previous => ({ ...previous, [role]: value })); setSaved(''); }} emptyLabel={role === 'worker' || role === 'bus' ? '沿用原生默认模型' : '沿用协调模型'} /></div>)}
       </details>
     </section>
@@ -248,14 +269,13 @@ export function SettingsPanel({ settings, catalog, catalogError, reloadModels, e
       {!permissions && !permissionError && <p className="loom-setting-hint" role="status">正在加载权限选项…</p>}
       {preset === 'danger-full-access' && <p className="loom-setting-hint">允许完整文件访问和命令执行。</p>}
     </section>
-    <details className="loom-advanced" onToggle={event => setDiagnostics(event.currentTarget.open)}><summary>高级与诊断{debug ? ' · 调试记录已开启' : ''}</summary>
+    <details className="loom-advanced" ref={scrollOnSettingsToggle} onToggle={event => setDiagnostics(event.currentTarget.open)}><summary>高级与诊断{debug ? ' · 调试记录已开启' : ''}</summary>
       <label className="loom-setting-row"><span className="loom-setting-label">调试记录</span><input className="loom-setting-control" aria-label="调试记录" type="checkbox" checked={debug} disabled={busy} onChange={event => { setDebug(event.target.checked); setSaved(''); }} /></label>
       <p className="loom-setting-hint">日志可能包含对话、文件内容及工具结果；分享前请检查敏感信息。</p>
       <button type="button" disabled={busy} onClick={reloadModels}>刷新模型列表</button>
       {catalog?.failures?.length > 0 && <details><summary>模型连接详情</summary><Json value={catalog.failures} /></details>}
       {diagnostics && <DebugPanel api={api} status={status} settings={current} onTick={onTick} busy={busy} />}
     </details>
-    <div className="loom-actions"><button className="loom-primary" type="submit" disabled={busy || invalidPermission}>{busy ? '保存中…' : '保存设置'}</button></div>
   </form></InlinePage>;
 }
 

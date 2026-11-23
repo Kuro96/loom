@@ -201,6 +201,8 @@ button.loom-danger-text{color:var(--dsw-alias-state-error-primary)}
 .loom-dialog>header>button{width:28px;height:28px;padding:0;border-color:transparent;font-size:18px}
 .loom-page-body>form>footer{background:var(--loom-bg)}
 .loom-settings{min-width:0;margin:0 auto;width:100%}
+.loom-page-body:has(>.loom-settings){scroll-padding-block:6px;scrollbar-gutter:stable}
+.loom-page>.loom-settings-save{flex:none;margin:0;padding:8px clamp(12px,4cqi,20px);background:var(--loom-bg)}
 .loom-settings-section{padding:16px 0;border-bottom:1px solid var(--loom-border)}
 .loom-settings-section:last-child{border-bottom:0}
 .loom-settings-section>h3{margin:0 0 12px}
