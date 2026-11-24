@@ -49,13 +49,14 @@ export class BusState {
       ...(previous ? {previousSessionId:previous.sessionId} : {})};
     this.save(); return structuredClone(this.value.current);
   }
+  readSegment(index) { return JSON.parse(readFileSync(join(this.directory,'segments',`${index}.json`),'utf8')); }
   history({cursor,limit=20}={}) {
     if (!Number.isSafeInteger(limit) || limit<1 || limit>50) throw contextError('LOOM_HISTORY_LIMIT','History limit must be 1..50');
     const total = Math.max(0,(this.value.current?.segment ?? 1)-1);
     let index = cursor === undefined ? total : Number(cursor);
     if (!Number.isSafeInteger(index) || index<0 || index>total) throw contextError('LOOM_HISTORY_CURSOR','Invalid segment cursor');
     const items = [];
-    while (index>0 && items.length<limit) { items.push(JSON.parse(readFileSync(join(this.directory,'segments',`${index}.json`),'utf8'))); index--; }
+    while (index>0 && items.length<limit) { items.push(this.readSegment(index)); index--; }
     return {items,total,nextCursor:index>0?String(index):null};
   }
 }

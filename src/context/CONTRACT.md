@@ -52,6 +52,8 @@ Host 构建将这些包保留为外部依赖，由宿主兼容版本提供。可
 
 客户端以 `ensureBus()` 返回的 `sessionId` 连接原生会话。空闲维护可能切换物理段，客户端应跟随 `getBus()` 的当前身份；历史段以只读 transcript 展示。
 
+总控的每个新会话段在发布段 ID 前，由 DSH 的 `workspace.attachSession` 登记到控制工作区。插件启动时依据总控索引补登记仍存在的当前段和历史段，保留原会话 ID。历史段被宿主拒绝时，记录诊断并继续登记其他段。控制目录下的普通会话继续由 DSH 按自身登记分组。
+
 bundle 通过原生启动依赖在 AgentLoop factory 就绪前加载 `dsh-loom/bootstrap`。启动保护限于专用控制工作区；总线创建和恢复在 awaited `agent/created` 中等待完整策略绑定。主插件与启动保护共用配置目录及 binding registry，绑定就绪后开放 Loom 接口。原生持有的 agent 可在插件重载后重新绑定；句柄的释放仍由其原始 owner 管理，缓存状态以 registry 中的实例为准。
 
 总线使用完整、稳定的 system section，动态焦点通过独立 context section 注入。工具范围为 `loom_query / loom_command / loom_focus`；参数统一为 `{request: JSON字符串}`，输出为 JSON 字符串。

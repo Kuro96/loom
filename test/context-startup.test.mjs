@@ -26,6 +26,64 @@ async function seed(host) {
   return {directory,bus};
 }
 
+test('production startup groups existing Loom sessions by ID without opening them or grouping ordinary sessions with the same cwd',{skip:!installed,timeout:30000},async()=>{
+  const host=await startupHost();
+  try {
+    const directory=join(host.directory,'loom'),control=join(directory,'control');
+    await mkdir(control,{recursive:true});
+    const workspace=await host.ctx.workspaceRegistry.create(control,'control');
+    const state=new BusState(join(directory,'context'),workspace.id);
+    state.commitSegment('missing-loom-history');
+    state.commitSegment('damaged-loom-history');
+    for(const sessionId of ['older-loom','active-loom','ordinary-control']) {
+      const handle=await host.ctx.agents.create({sessionId,meta:{cwd:control},agentOptions:model});
+      await handle.dispose();
+      assert.ok(await host.ctx.sessionPersistence.stat(sessionId));
+      if(sessionId!=='ordinary-control') state.commitSegment(sessionId);
+    }
+    await fs.writeFile(join(directory,'context','segments','2.json'),'{truncated');
+    assert.deepEqual(workspace.sessionIds,[]);
+    await host.root.plugin(bootstrap,{directory}).await();
+    let applying;
+    await host.root.plugin({name:'loom-membership-driver',inject:loom.inject,apply(ctx){applying=loom.apply(ctx,{directory});}}).await();
+    await applying;
+    assert.deepEqual([...workspace.sessionIds].sort(),['active-loom','older-loom']);
+    assert.deepEqual(JSON.parse(readFileSync(state.file,'utf8')).current,state.value.current);
+    assert.equal(host.ctx.agents.get('active-loom'),undefined);
+    assert.equal(host.received.length,0);
+  } finally {await host.close();}
+});
+
+for(const failure of ['corrupt log','missing cwd']) {
+  test(`a historical ${failure} does not block registration of the current coordinator`,{skip:!installed,timeout:30000},async()=>{
+    const host=await startupHost(undefined,{},'zstd');
+    try {
+      const directory=join(host.directory,'loom'),control=join(directory,'control'),former=join(host.directory,'former-control');
+      await mkdir(control,{recursive:true});
+      await mkdir(former);
+      const workspace=await host.ctx.workspaceRegistry.create(control,'control');
+      const state=new BusState(join(directory,'context'),workspace.id);
+      for(const sessionId of ['old-bus','current-bus']) {
+        const cwd=sessionId==='old-bus' && failure==='missing cwd' ? former : control;
+        const handle=await host.ctx.agents.create({sessionId,meta:{cwd},agentOptions:model});
+        const {header}=handle.agent.session;
+        await handle.dispose();
+        const artifact=host.ctx.sessionPersistence.locate(header).path;
+        if(sessionId==='old-bus' && failure==='corrupt log') await fs.writeFile(artifact,'broken zstd');
+        state.commitSegment(sessionId);
+      }
+      await fs.rmdir(former);
+      await host.root.plugin(bootstrap,{directory}).await();
+      let applying;
+      await host.root.plugin({name:'loom-membership-driver',inject:loom.inject,apply(ctx){applying=loom.apply(ctx,{directory});}}).await();
+      await applying;
+      assert.deepEqual(workspace.sessionIds,['current-bus']);
+      assert.equal(host.ctx.agents.get('current-bus'),undefined);
+      assert.equal(host.received.length,0);
+    } finally {await host.close();}
+  });
+}
+
 function assertWire(wire) {
   assert.ok(wire.messages[0].content.includes('You are Loom'));
   assert.ok(wire.messages[0].content.includes('A workflow stores reusable work instructions.'));

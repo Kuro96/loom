@@ -79,8 +79,52 @@ export async function createLoomContext(ctx, options) {
     busAgent=agent;
   }
   async function bindCurrent() {
+    await reconcileMembership();
     const agent=state.value.current && ctx.agents.get(state.value.current.sessionId);
     if(agent) await adopt(agent);
+  }
+  async function reconcileMembership() {
+    const current=state.value.current;
+    if(current===null) return;
+    const registered=new Set(workspace.sessionIds),persistence=ctx.get('sessionPersistence');
+    async function attachStored({sessionId}) {
+      if(!registered.has(sessionId) && await persistence.stat(sessionId,{signal:closing.signal})) {
+        await workspace.attachSession(sessionId);
+        registered.add(sessionId);
+      }
+    }
+    for(let index=1;index<current.segment;index++) {
+      let segment;
+      try {segment=state.readSegment(index);}
+      catch(error) {
+        if(!(error instanceof SyntaxError) && error.code!=='ENOENT') throw error;
+        ctx.logger.warn(`Loom could not group historical segment ${index}: ${error.message}`);
+        continue;
+      }
+      if(segment?.busId!==current.busId || segment.segment!==index || typeof segment.sessionId!=='string' || !segment.sessionId) {
+        ctx.logger.warn(`Loom could not group historical segment ${index}: invalid segment identity`);
+        continue;
+      }
+      // Historical registration is independent of the current segment. Workspace
+      // attachment reports path refusals as ordinary errors in the native API.
+      try {await attachStored(segment);}
+      catch(error) {
+        closing.signal.throwIfAborted();
+        ctx.logger.warn(`Loom could not group historical segment ${index}: ${error.message}`);
+      }
+    }
+    await attachStored(current);
+  }
+  async function createBusAgent(agentOptions,handover) {
+    const sessionId=`session-${randomUUID()}`;
+    const candidate=await ctx.agents.create({sessionId,meta:{cwd:workspace.path},agentOptions,setup:(agentCtx,agent)=>setup(agentCtx,agent,handover)});
+    try {
+      await workspace.attachSession(sessionId);
+      return candidate;
+    } catch(error) {
+      try {await candidate.dispose();} finally {owned.delete(sessionId);}
+      throw error;
+    }
   }
   async function adopt(agent) {
     const binding=guardAgent(agent);
@@ -192,9 +236,8 @@ export async function createLoomContext(ctx, options) {
     const {toolPairingBalancedAfter}=require('@deepseek-ai/dsh-compaction');
     if(!toolPairingBalancedAfter(source,nodes.at(-1))) throw contextError('LOOM_TOOL_PAIRING','Recovered history ends inside a tool interaction');
     const handover={focus:state.value.focus,messages:source.deriveMessages().filter(message=>message.role!=='system'),source:{sessionId:source.id,sourceEventSeqs:nodes,events:nodes.map(seq=>{const event=source.eventAt(seq);return {seq,...(event.sourceEventSeqs ? {sourceEventSeqs:event.sourceEventSeqs} : {})};})}};
-    const sessionId=`session-${randomUUID()}`;
-    const recovered=await ctx.agents.create({sessionId,meta:{cwd:workspace.path},agentOptions,setup:(agentCtx,agent)=>setup(agentCtx,agent,handover)});
-    state.commitSegment(sessionId);
+    const recovered=await createBusAgent(agentOptions,handover);
+    state.commitSegment(recovered.agent.id);
     return recovered;
   }
   async function recoverHeadless(error,agentOptions) {
@@ -278,9 +321,13 @@ export async function createLoomContext(ctx, options) {
         const handover=jsonBytes({focus,messages})>config().checkpointMaxBytes
           ? {focus,summary:await policy.summarize(messages,agent,signal)} : {focus,messages};
         signal.throwIfAborted();
-        const sessionId=`session-${randomUUID()}`;
-        candidate=await ctx.agents.create({sessionId,meta:{cwd:workspace.path},agentOptions,setup:(agentCtx,next)=>setup(agentCtx,next,handover)});
-        if(agent.inbox.nextTurn.length || agent.inbox.nextStep.length || signal.aborted) {await candidate.dispose();owned.delete(sessionId);candidate=null;return;}
+        candidate=await createBusAgent(agentOptions,handover);
+        const sessionId=candidate.agent.id;
+        if(agent.inbox.nextTurn.length || agent.inbox.nextStep.length || signal.aborted) {
+          try {await workspace.detachSession(sessionId);}
+          finally {await candidate.dispose();owned.delete(sessionId);}
+          candidate=null;return;
+        }
         state.commitSegment(sessionId);
       });
       if(candidate) {handle=candidate;busAgent=candidate.agent;owned.delete(agent.id);bindings.get(agent).active=false;if(previous)await previous.dispose();}
@@ -303,10 +350,9 @@ export async function createLoomContext(ctx, options) {
         return ensure();
       }
     } else {
-      const sessionId=`session-${randomUUID()}`;
-      handle=await ctx.agents.create({sessionId,meta:{cwd:workspace.path},agentOptions,setup});
+      handle=await createBusAgent(agentOptions);
       busAgent=handle.agent;
-      state.commitSegment(sessionId);
+      state.commitSegment(busAgent.id);
     }
     return structuredClone(state.value.current);
   }

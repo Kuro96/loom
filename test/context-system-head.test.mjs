@@ -33,11 +33,13 @@ test('rotation retains identical system and tools on the actual Pi-ai wire', {sk
   try {
     manager=await createLoomContext(f.host.ctx,f.options);
     const first=await manager.ensureBus(),old=f.host.ctx.agents.get(first.sessionId);
+    assert.deepEqual(f.host.workspace.sessionIds,[first.sessionId]);
     old.followup(f.user('first segment'));await old.whenIdle();
     assert.equal(f.received.length,1);assertHead(old);
     f.settings.context.segmentMaxEvents=8;
     const second=await manager.ensureBus();
     assert.equal(second.segment,2);
+    assert.deepEqual(new Set(f.host.workspace.sessionIds),new Set([first.sessionId,second.sessionId]));
     f.settings.context.segmentMaxEvents=1000;
     await manager.dispose();manager=await createLoomContext(f.host.ctx,f.options);
     assert.equal((await manager.ensureBus()).sessionId,second.sessionId);
@@ -100,6 +102,7 @@ Keep answers concise. Ask for clarification when a workspace, reference or reque
     const recovered=await manager.ensureBus();
     assert.notEqual(recovered.sessionId,session.id);
     assert.equal(recovered.previousSessionId,session.id);
+    assert.ok(f.host.workspace.sessionIds.includes(recovered.sessionId));
     const agent=f.host.ctx.agents.get(recovered.sessionId);
     const record=agent.session.snapshotEvents().find(event=>event.type==='plugin:dsh-loom/handover');
     const memory=JSON.parse(record.data.message.content[0].text.split('\n').slice(1).join('\n'));
