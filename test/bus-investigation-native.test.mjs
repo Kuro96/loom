@@ -22,8 +22,10 @@ const fact='Ledger Bin-B9, version v17';
 const missing='registry-index-77no-match';
 const batch='original-versioned-batch-31';
 
-for(const disposition of ['continue','pause','cancel']) test(`native read-only investigation after a session miss: ${disposition==='continue'?'overlap with one ordinary run':disposition}`,{skip:!installed,timeout:30000},async()=>{
+for(const disposition of ['continue','pause','cancel','project-pause']) test(`native read-only investigation after a session miss: ${disposition==='continue'?'overlap with one ordinary run':disposition}`,{skip:!installed,timeout:30000},async()=>{
   let original,foreign,source,search,dispatch,notSearched,wrongProject,wrongVersion,verified,blockedTool,blockedHelp,blockedValue,invocations=0;
+  let initialRevision;
+  const freshClaim=Promise.withResolvers();
   const investigation=Promise.withResolvers(), release=Promise.withResolvers(), continued=Promise.withResolvers(), consumed=Promise.withResolvers();
   const busEntered=Promise.withResolvers(), busRelease=Promise.withResolvers();
   const cEntered=Promise.withResolvers(), cRelease=Promise.withResolvers(), dEntered=Promise.withResolvers();
@@ -33,8 +35,13 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
     const names=wire.tools?.map(item=>item.function.name) ?? [];
     if(contents.includes('Keep the main coordinator busy')) {busEntered.resolve();await busRelease.promise;return reply(res,{content:'Finished.'});}
     if(names.includes('loom_command')) {
-      const reminder=contents.find(value=>value.startsWith('[Loom help reminder]'));
+      const reminder=contents.findLast(value=>value.startsWith('[Loom help reminder]'));
       const {workId,expectedVersion,operationId}=JSON.parse(reminder.split('\n')[1]);
+      initialRevision??=expectedVersion;
+      if(['pause','project-pause'].includes(disposition) && expectedVersion!==initialRevision) {
+        freshClaim.resolve({workId,operationId,expectedVersion});
+        return reply(res,{content:'The original need is queued for a fresh check.'});
+      }
       const pick=(workId,runId,resultVersion)=>({workId,runId,resultVersion,output:'manifest'});
       const select=(id,pin)=>command(res,id,{type:'work.resolveWait',workId,expectedVersion,operationId,action:'investigate',source:pin});
       const pin=pick(source.id,source.result.runId,source.result.version);
@@ -201,7 +208,33 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
       assert.equal(bRun.permissionPreset,null);
       assert.deepEqual(bRun.inputs,{manifest:fact});
       assert.deepEqual(bRun.consumedResults,[{inputName:'manifest',workId:source.id,runId:source.result.runId,resultVersion:source.result.version,output:'manifest',path:[],value:fact}]);
-      if(disposition==='pause') await rpc('command',{type:'work.pause',workId:original.id,expectedVersion:originalWait.version});
+      if(['pause','project-pause'].includes(disposition)) {
+        let fenced,resumed;
+        if(disposition==='pause') {
+          fenced=await rpc('command',{type:'work.pause',workId:original.id,expectedVersion:originalWait.version});
+          assert.equal(fenced.status,'paused');
+          resumed=await rpc('command',{type:'work.resume',workId:original.id,expectedVersion:fenced.version});
+          assert.equal(resumed.status,'waiting','work resume must wait for a fresh check instead of queueing A to run');
+        } else {
+          const {items:[project]}=await rpc('query',{kind:'workspace',workspaceId});
+          const toggle=(paused,expectedVersion)=>rpc('command',{type:'workspace.setCoordinationPaused',workspaceId,paused,expectedVersion});
+          const paused=await toggle(true,project.version);
+          fenced=await get(original.id);
+          assert.equal(fenced.status,'waiting');
+          await toggle(false,paused.version);
+          resumed=fenced;
+        }
+        assert.ok(fenced.version>originalWait.version,'pause must fence the pending investigation’s parent version');
+        assert.equal(fenced.wait.investigation,undefined);
+        assert.deepEqual(fenced.wait.source,originalWait.wait.source);
+        const fresh=await deadline(freshClaim.promise,'the same parent is claimed after explicit resume');
+        assert.deepEqual(fresh,{workId:original.id,operationId:originalWait.wait.operationId,expectedVersion:resumed.version+1});
+        const {items}=await rpc('query',{kind:'event',workId:original.id});
+        const claims=items.filter(event=>event.type==='work.waitCoordination');
+        assert.equal(claims.length,2);
+        assert.notEqual(claims[1].detail.actionId,child.investigation.actionId);
+        assert.equal(items.find(event=>event.type==='work.coordinationRevoked').detail.childWorkId,child.id);
+      }
       if(disposition==='cancel') {
         host.ctx.on('session/event',(session,event)=>{
           if(session.id!==bRun.sessionId || event.type!=='turn/end') return;
@@ -215,7 +248,7 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
       const bEvents=host.ctx.agents.get(bRun.sessionId).session.snapshotEvents();
       const received=bEvents.find(event=>event.type==='tool/result' && event.data.message.toolCallId==='verified-fact');
       assert.ok(received,'read back the native result');
-      assert.equal(received.data.message.isError,disposition==='pause');
+      assert.equal(received.data.message.isError,['pause','project-pause'].includes(disposition));
       assert.equal(invocations,0);
       if(disposition==='continue') {
         assert.equal(finished.status,'completed');
@@ -266,9 +299,18 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
         const [consumerRun]=await runs(dependent.id);
         assert.deepEqual(consumerRun.consumedResults,[{inputName:'manifest',workId:original.id,runId:resumedRun.id,
           resultVersion:deliverable.result.version,output:'manifest',path:[],value:fact}]);
+      } else if(['pause','project-pause'].includes(disposition)) {
+        const current=await get(original.id);
+        assert.equal(current.status,'waiting');
+        assert.equal(current.wait.handoff,undefined);
+        assert.equal(finished.status,'failed');
+        assert.equal(finished.id,bRun.id);
+        assert.deepEqual((await get(child.id)).investigation,child.investigation);
+        assert.deepEqual(await get(source.id),source);
+        assert.deepEqual(await runs(original.id),[aRun]);
       } else {
         const current=await get(original.id);
-        assert.equal(current.status,disposition==='pause'?'paused':'cancelled');
+        assert.equal(current.status,'cancelled');
         assert.equal(finished.status,'failed');
         assert.equal(current.wait.handoff,undefined);
         assert.equal((await runs(original.id)).length,1);

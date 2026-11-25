@@ -54,6 +54,7 @@ const now = () => new Date().toISOString();
 function recordBody(kind,row) {
   const value=JSON.parse(row.body);
   if(kind==='work') value.documents??=[];
+  if(kind==='workspace') value.coordinationPaused??=false;
   return value;
 }
 function canonical(value) {
@@ -532,6 +533,7 @@ export class LoomStore {
   nextExternalWait(at=now(),workspaceId=null) {
     const row=this.#db.prepare(`SELECT w.body FROM works w JOIN workspaces p ON p.id=w.workspaceId
       WHERE w.status='waiting' AND json_extract(p.body,'$.active')=1
+      AND json_type(p.body,'$.coordinationPaused') IS NOT 'true'
       AND (CASE WHEN ? IS NULL THEN json_extract(w.body,'$.wait.kind') IS NOT 'help' ELSE w.workspaceId=? END)
       AND julianday(COALESCE(json_extract(w.body,'$.wait.coordination.retryAt'),json_extract(w.body,'$.wait.nextCheckAt')))<=julianday(?)
       ORDER BY julianday(COALESCE(json_extract(w.body,'$.wait.coordination.retryAt'),json_extract(w.body,'$.wait.nextCheckAt'))),w.seq LIMIT 1`).get(workspaceId,workspaceId,at);
@@ -541,7 +543,8 @@ export class LoomStore {
     return this.#transaction(()=>{
       const work=this.#get('work',workId);
       if(work===null || work.status!=='waiting' || work.version!==version) return null;
-      if(this.#get('workspace',work.workspaceId)?.active!==true) return null;
+      const project=this.#get('workspace',work.workspaceId);
+      if(project?.active!==true || project.coordinationPaused) return null;
       if(zonedTime(work.wait.coordination?.retryAt??work.wait.nextCheckAt)>zonedTime(at)) return null;
       const actionId=work.wait.coordination?.actionId??randomUUID();
       const attempt=(work.wait.coordination?.attempt??0)+1;
@@ -556,7 +559,9 @@ export class LoomStore {
     const due=zonedTime(at);requireValue(Number.isInteger(limit) && limit>0 && limit<=200,'唤醒条数须为1至200');
     return this.#transaction(()=>{
       const result=[];
-      for(const row of this.#db.prepare("SELECT body FROM works WHERE status='waiting' AND json_extract(body,'$.wait.kind') IS NOT 'help' ORDER BY seq").iterate()) {
+      for(const row of this.#db.prepare(`SELECT w.body FROM works w LEFT JOIN workspaces p ON p.id=w.workspaceId
+        WHERE w.status='waiting' AND json_extract(w.body,'$.wait.kind') IS NOT 'help'
+          AND json_type(p.body,'$.coordinationPaused') IS NOT 'true' ORDER BY w.seq`).iterate()) {
         const work=JSON.parse(row.body);
         if(zonedTime(work.wait.nextCheckAt)>due) continue;
         work.status='queued';this.#saveWork(work);this.#event('work.woken',work,{kind:'host'},{wait:work.wait,at});result.push(work);
@@ -564,6 +569,30 @@ export class LoomStore {
       }
       return result;
     });
+  }
+  #revokeProjectCoordination(workspaceId,actor,timestamp) {
+    const rows=this.#db.prepare(`SELECT body FROM works WHERE workspaceId=? AND status='waiting' AND (
+      json_type(body,'$.wait.coordination')='object' OR json_extract(body,'$.wait.investigation.status')='pending') ORDER BY seq`).all(workspaceId);
+    for(const row of rows) this.#saveRevokingCoordination(recordBody('work',row),actor,timestamp,'project-coordination-paused');
+  }
+  #saveRevokingCoordination(work,actor,timestamp,reason) {
+    const {coordination,investigation}=work.wait,previousVersion=work.version;
+    const pending=investigation?.status==='pending'?investigation:null;
+    if(coordination===undefined && pending===null) return this.#saveWork(work);
+    delete work.wait.coordination;
+    if(pending!==null) {
+      delete work.wait.investigation;
+      work.wait.nextCheckAt??=timestamp;
+      const child=this.#get('work',pending.workId);
+      if(child?.status==='queued') {
+        child.status='cancelled';this.#saveWork(child);
+        this.#event('work.cancel',child,actor,{version:child.version,reason});
+      }
+    }
+    this.#saveWork(work);
+    this.#event('work.coordinationRevoked',work,actor,{version:work.version,previousVersion,reason,operationId:work.wait.operationId,
+      actionId:pending?.actionId??coordination?.actionId,...(pending===null?{}:{childWorkId:pending.workId})});
+    return work;
   }
   #reworkPreview(workId) {
     const work=this.#required('work',workId),seen=new Set([workId]),affected=[];
@@ -687,6 +716,7 @@ export class LoomStore {
     const row=this.#db.prepare('SELECT body FROM work_documents WHERE id=? AND workId=?').get(documentId,workId);
     return row?JSON.parse(row.body):null;
   }
+  getWorkspace(id) { return this.#get('workspace',id); }
   getWork(id) { return this.#get('work',id); }
   getWorkForSession(sessionId) {
     text(sessionId,'会话ID');
@@ -769,6 +799,7 @@ export class LoomStore {
     requireValue(input && typeof input==='object','命令格式错误');
     if(isUserCleanupCommand(input.type)) requireValue(actor.kind==='user','取消提案或删除记录须由用户提交','FORBIDDEN');
     if(input.type==='work.retryAcceptance') requireValue(actor.kind==='user','重新预验收须由用户提交','FORBIDDEN');
+    if(input.type==='workspace.setCoordinationPaused') requireValue(actor.kind==='user','项目协调须由用户暂停或恢复','FORBIDDEN');
     if(['work.addReport','work.resolveWait'].includes(input.type)) requireValue(actor.kind==='agent' && typeof coordinatorSessionId==='string' &&
       actor.sessionId===coordinatorSessionId,'此操作仅供当前总控会话使用','FORBIDDEN');
     actor={kind:actor.kind,...(actor.sessionId===undefined?{}:{sessionId:text(actor.sessionId,'会话ID')})};
@@ -806,6 +837,7 @@ export class LoomStore {
           ...(input.action==='continue'?{information:handoff.information}:input.action==='ask'?{missingInformation}:{condition,checkMethod,nextCheckAt})});
       }
       else this.#event(input.type,target,actor,{version:target.version??null,
+        ...(input.type==='workspace.setCoordinationPaused'?{coordinationPaused:target.coordinationPaused}:{}),
         ...(target.result?.acceptance?{acceptance:target.result.acceptance}:{}),
         ...(target.modelConsent?{modelConsent:target.modelConsent}:{}),
         ...(target.checksConsent?{checksConsent:target.checksConsent}:{}),
@@ -954,6 +986,15 @@ export class LoomStore {
       text(input.title,'报告标题');documentSchema(input.document);
       this.#appendDocument(work,run.id,'coordinator',input.title,input.document);
       return this.#saveWork(work);
+    }
+    if(input.type==='workspace.setCoordinationPaused') {
+      requireValue(Object.keys(input).every(key=>['type','workspaceId','paused','expectedVersion','idempotencyKey'].includes(key)) &&
+        typeof input.paused==='boolean','项目协调暂停须为布尔值');
+      const project=this.#workspace(input.workspaceId);this.#version(project,input,true);
+      if(project.coordinationPaused===input.paused) return project;
+      project.coordinationPaused=input.paused;project.version++;project.updatedAt=timestamp;
+      if(input.paused) this.#revokeProjectCoordination(project.id,actor,timestamp);
+      return this.#put('workspace',project);
     }
     if(['workspace.setKnowledge','workflow.setKnowledge'].includes(input.type)) {
       const kind=input.type.startsWith('workspace.')?'workspace':'workflow';
@@ -1215,6 +1256,10 @@ export class LoomStore {
         const {missingInformation,...reference}=work.wait;
         work.wait={...reference,information};
       } else requireValue(input.information===undefined,'当前工作没有待补信息');
+      if(work.wait?.investigation?.status==='pending') {
+        work.status='waiting';
+        return this.#saveRevokingCoordination(work,actor,timestamp,'work-paused');
+      }
       if(work.wait?.nextCheckAt && work.wait.information===undefined) {
         const {coordination,...reference}=work.wait;
         work.wait=reference;
@@ -1240,6 +1285,7 @@ export class LoomStore {
       const target=kind==='pause'?'paused':'cancelled', requested=`${kind}_requested`;
       if([target,requested].includes(work.status)) return work;
       requireValue(work.status!=='accepted' && work.status!=='cancelled' && !(kind==='pause'&&work.status==='cancel_requested'),'当前任务状态不支持此控制','INVALID_STATE');
+      const revokeCoordination=kind==='pause' && work.status==='waiting';
       const row=this.#db.prepare(`SELECT body FROM runs WHERE workId=? AND status IN ${activeRunSQL}`).get(work.id);
       if(row) {
         const run=JSON.parse(row.body);
@@ -1252,7 +1298,7 @@ export class LoomStore {
           runId:run.id,sessionId:run.sessionId,requestId:randomUUID(),kind,status:'pending',attempts:0,actor,createdAt:timestamp};
         this.#put('control',control);
       } else work.status=target;
-      return this.#saveWork(work);
+      return revokeCoordination?this.#saveRevokingCoordination(work,actor,timestamp,'work-paused'):this.#saveWork(work);
     }
     if(input.type==='work.releaseGate') {
       requireValue(actor.kind==='user','人工关卡须由用户释放','FORBIDDEN');

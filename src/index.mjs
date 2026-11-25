@@ -70,8 +70,12 @@ async function initialize(ctx,config,bindingReady,directory,controlPath) {
     status:()=>status(),
     usage:payload=>context.getUsage(payload),
     snapshot:(payload)=>{
-      const workspaces=engine.native.workspaces();
-      store.syncWorkspaces(workspaces);
+      const nativeWorkspaces=engine.native.workspaces();
+      store.syncWorkspaces(nativeWorkspaces);
+      const workspaces=nativeWorkspaces.map(project=>{
+        const {coordinationPaused,version}=store.getWorkspace(project.workspaceId);
+        return {...project,coordinationPaused,version};
+      });
       return {works:store.query({kind:'work',...payload}),workflows:store.query({kind:'workflow',workspaceId:payload.workspaceId,limit:100}),uses:store.query({kind:'use',workspaceId:payload.workspaceId,limit:100}),workspaces,settings:store.getSettings(),bus:context.getBus(),engine:engine.status(),context:context.getStatus()};
     },
     query:payload=>store.query(payload),

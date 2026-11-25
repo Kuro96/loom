@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { LoomStore } from '../src/core/store.mjs';
 
 const user={kind:'user'},agent={kind:'agent',sessionId:'bus'},model={provider:'local',model:'worker'};
@@ -281,6 +282,86 @@ test('resumed coordination preserves its schedule and ignores stale wait decisio
   assert.equal(queued.status,'queued');assert.equal(queued.wait.handoff.information,'Check Bin-B9');
   assert.equal(queued.wait.handoff.actionId,retry.wait.coordination.actionId);
   assert.equal(s.reserveRun(w.id).sessionId,run.sessionId);
+});
+
+test('project pause retires an existing claim and preserves the original due operation',t=>{
+  const f=fixture(t);let s=f.store;
+  const original=approve(s,create(s)),run=s.reserveRun(original.id),report=waitReport(original),due=report.wait.nextCheckAt;
+  s.reportRun(run.id,report,source(run));
+  const settled=s.settleReport(run.id,{callId:'report',eventCursor:5,coordinate:true});
+  const claim=s.claimExternalWait(original.id,s.getWork(original.id).version,due);
+  const ordinary=s.reserveRun(approve(s,create(s)).id),ordinaryWork=s.getWork(ordinary.workId);
+  const [project,other]=s.query({kind:'workspace'}).items;
+  const request={type:'workspace.setCoordinationPaused',workspaceId:project.id,paused:true,expectedVersion:project.version};
+  assert.throws(()=>s.command(request,agent),{code:'FORBIDDEN'});
+  assert.throws(()=>s.command({...request,expectedVersion:undefined},user),{code:'CONFLICT'});
+  assert.throws(()=>s.command({...request,paused:'true'},user),{code:'INVALID_INPUT'});
+  const paused=s.command(request,user),fenced=s.getWork(original.id);
+  assert.equal(fenced.status,'waiting');
+  assert.equal(fenced.version,claim.version+1,'pause invalidates the claimed Work version');
+  assert.deepEqual(fenced.wait,report.wait);
+  assert.deepEqual(s.getWork(ordinary.workId),ordinaryWork);
+  assert.deepEqual(s.getRun(ordinary.id),ordinary);
+  s=f.reopen();
+  s.syncWorkspaces([{...project,title:'Renamed project'},other]);
+  const [renamed]=s.query({kind:'workspace',workspaceId:project.id}).items;
+  assert.equal(renamed.coordinationPaused,true);
+  assert.equal(s.nextExternalWait(due),null);
+  assert.equal(s.claimExternalWait(original.id,fenced.version,due),null);
+  assert.deepEqual(s.wakeWaiting(due),[]);
+  assert.throws(()=>s.command({...request,paused:false,expectedVersion:paused.version},user),{code:'CONFLICT'});
+  s.command({...request,paused:false,expectedVersion:renamed.version},user);
+  const waiting=s.nextExternalWait(due,project.id);
+  assert.equal(waiting.id,original.id);
+  const fresh=s.claimExternalWait(waiting.id,waiting.version,due);
+  assert.notEqual(fresh.wait.coordination.actionId,claim.wait.coordination.actionId);
+  assert.equal(fresh.wait.coordination.attempt,1);
+  assert.equal(s.claimExternalWait(waiting.id,waiting.version,due),null);
+  const resolve={type:'work.resolveWait',workId:original.id,expectedVersion:claim.version,operationId:original.id,
+    action:'continue',sources:['Project ledger'],information:'Use the latest ledger'};
+  const opts={coordinatorSessionId:agent.sessionId};
+  assert.throws(()=>s.command(resolve,agent,opts),{code:'CONFLICT'});
+  assert.deepEqual(s.getWork(original.id),fresh);
+  const queued=s.command({...resolve,expectedVersion:fresh.version},agent,opts);
+  assert.equal(queued.wait.handoff.actionId,fresh.wait.coordination.actionId);
+  assert.deepEqual(s.getRun(run.id),settled);
+  const [revocation]=s.query({kind:'event',workId:original.id}).items.filter(event=>event.type==='work.coordinationRevoked');
+  assert.equal(revocation.detail.actionId,claim.wait.coordination.actionId);
+});
+
+for(const mode of ['project pause','legacy work resume']) test(`${mode} retires a queued investigation before it reserves a run`,t=>{
+  const {store:s,file}=fixture(t);
+  const ledger=approve(s,create(s,{outputs:[{name:'manifest',required:true}]}));
+  const ledgerRun=s.reserveRun(ledger.id);
+  s.reportRun(ledgerRun.id,{kind:'result',summary:'Current ledger',outputs:{manifest:'Revision 17'}},source(ledgerRun));
+  const finished=s.finishRun(ledgerRun.id,{reason:'completed',summary:'Current ledger',eventCursor:5,reportCallId:'report'});
+  s.command({type:'work.accept',workId:ledger.id,runId:ledgerRun.id,expectedVersion:finished.resultVersion},user);
+  const original=approve(s,create(s)),run=s.reserveRun(original.id);
+  s.reportRun(run.id,{kind:'help',summary:'Missing ledger',help:{missingInformation:'Which revision?',attempted:'Read local files',expectedEvidence:'Revision number'}},source(run));
+  s.settleReport(run.id,{callId:'report',eventCursor:5,coordinate:true});
+  const waiting=s.nextExternalWait(new Date().toISOString(),'a'),claim=s.claimExternalWait(waiting.id,waiting.version);
+  const parent=s.startInvestigation({type:'work.resolveWait',workId:original.id,expectedVersion:claim.version,operationId:original.id,action:'investigate',
+    source:{workId:ledger.id,runId:ledgerRun.id,resultVersion:finished.resultVersion,output:'manifest'}},agent);
+  const child=s.readyWork()[0];
+  assert.equal(child.id,parent.wait.investigation.workId);
+  if(mode==='project pause') {
+    const [project]=s.query({kind:'workspace',workspaceId:'a'}).items;
+    s.command({type:'workspace.setCoordinationPaused',workspaceId:'a',paused:true,expectedVersion:project.version},user);
+  } else {
+    const legacy={...parent,status:'paused',version:parent.version+1};
+    const db=new DatabaseSync(file);
+    try {db.prepare("UPDATE works SET status='paused',body=? WHERE id=?").run(JSON.stringify(legacy),parent.id);}
+    finally {db.close();}
+    const resumed=s.command({type:'work.resume',workId:parent.id,expectedVersion:legacy.version},user);
+    assert.equal(resumed.status,'waiting');
+    assert.equal(resumed.wait.investigation,undefined);
+    assert.equal(s.nextExternalWait(new Date().toISOString(),'a').id,parent.id);
+  }
+  assert.deepEqual(s.readyWork(),[]);
+  assert.equal(s.getWork(child.id).status,'cancelled');
+  assert.equal(s.getWork(child.id).version,child.version+1);
+  assert.deepEqual(s.getWork(child.id).investigation,child.investigation);
+  assert.equal(s.query({kind:'run',workId:child.id}).total,0);
 });
 
 test('external wait decisions retain their original evidence after another check and reopen',t=>{

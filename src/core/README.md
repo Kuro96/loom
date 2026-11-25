@@ -139,6 +139,8 @@ source = {sessionId,requestId,turn,step,callId};
 - `help` 用于缺少关键事实。`wait.source` 记录原 Run、session、工具步骤与轮次结束游标。`wait.originalOperation` 保存最初远端检查条件和用户补充，`wait.supplements` 保存后续补充；续办提示一并携带。
 - 宿主按项目以 `nextExternalWait(at,workspaceId)` 选到期工作，使用 `claimExternalWait` 保存 `actionId`、认领版本及退避时间，再通知项目后台协调会话。同一未结算动作再次认领沿用其 `actionId`；认领、原生入轮与 `work.resolveWait` 决定各有记录。`work.resolveWait` 验证协调会话、工作版本和操作 ID；可保存交接线索并排回队列、安排下次检查，或登记具体待补信息。下一 Run 保留 Work/session/operationId、原 inputs/consumedResults 及已查来源。暂停、取消或改版使旧认领失效。
 - 求助已让位且本轮项目会话搜索完整返回空结果时，`work.resolveWait` 的 `investigate` 可按 `{workId,runId,resultVersion,output}` 选定本项目已验收的一项文本输出。协查沿用原工作和来源运行共同获批的模型，在独立项目会话中只用 `loom_report` 核实该值。宿主按原生报告回执和双方版本结算；有效结果随来源和回执定位排回原会话，输入快照保持不变。
+- 用户用 `workspace.setCoordinationPaused {workspaceId,paused,expectedVersion}` 暂停或恢复项目自动协调，返回更新后的工作区记录。`snapshot.workspaces` 和 `query({kind:'workspace',workspaceId})` 均提供布尔 `coordinationPaused`（缺省 `false`）和当前 `version`。暂停将待协调工作留在原队列，普通执行照常推进。已有认领及待回传协查按 Work 版本作废，`work.coordinationRevoked` 保留原动作及关联协查 ID；恢复后，到期工作使用新动作 ID 重新认领。
+- 暂停等待协查的单个工作使用相同作废机制。`work.resume` 将原工作放回协调队列，新的协调决定驱动后续执行。
 
 核心保存候选。Host 核同归属 turn 正常结束、对应原生 tool/result 成功、会话 idle 且活动归零，再调用 finishRun/settleReport。Host 负责失败回执诊断、恢复成功事实重建及原生工具终结保护。取消 waiting 结束本地跟踪，保留远端引用供展示及对账。
 
