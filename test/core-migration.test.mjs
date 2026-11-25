@@ -60,7 +60,7 @@ test('legacy migration preserves identities, all associations, prompts, evidence
     assert.throws(()=>s.command({type:'workflow.update',workflowId:'line',expectedVersion:7,definition:{title:'Converted',stages:[{id:'s',title:'s'}]}},user),{code:'INVALID_STATE'});
     const before=s.query({kind:'use'});s.close();s=new LoomStore(f.file);assert.deepEqual(s.query({kind:'use'}),before);
     const sql=new DatabaseSync(f.file);try {
-      assert.equal(sql.prepare('PRAGMA user_version').get().user_version,1);assert.equal(sql.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
+      assert.equal(sql.prepare('PRAGMA user_version').get().user_version,2);assert.equal(sql.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
       assert.deepEqual(JSON.parse(sql.prepare('SELECT result FROM commands WHERE key=?').get('old').result),{workflow:f.wf,works:[f.work]});
       assert.equal(sql.prepare('SELECT fingerprint FROM commands WHERE key=?').get('old').fingerprint,'original-fingerprint');
     } finally {sql.close();}
@@ -79,4 +79,46 @@ test('a broken dependency rolls back the entire legacy database migration',t=>{
     assert.equal(sql.prepare('PRAGMA user_version').get().user_version,0);assert.deepEqual(sql.prepare('SELECT body FROM workflows ORDER BY seq').all(),rows);
     assert.equal(sql.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='uses'").get().n,0);
   } finally {sql.close();}
+});
+
+test('v1 run locks migrate to bounded slots and preserve per-Work exclusion across reopen',t=>{
+  const dir=mkdtempSync(join(process.env.TMPDIR,'loom-run-lanes-')),file=join(dir,'loom.sqlite');
+  t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const sql1=new DatabaseSync(file);
+  const insert=(db,run)=>db.prepare('INSERT INTO runs(id,workspaceId,workId,status,body) VALUES(?,?,?,?,?)')
+    .run(run.id,run.workspaceId,run.workId,run.status,JSON.stringify(run));
+  const b={id:'b-run',workspaceId:'project',workId:'b',status:'running',requestId:'b-request',sessionId:'b-session',cursor:14,
+    modelConsent:{actor:{kind:'host',source:'readonly-investigation'}}};
+  const c={id:'c-run',workspaceId:'project',workId:'c',status:'dispatching',requestId:'c-request',sessionId:'c-session',cursor:-1};
+  const e={...c,id:'e-run',workId:'e',workspaceId:'other'};
+  try {
+    sql1.exec(`CREATE TABLE runs(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,
+      workspaceId TEXT,workflowId TEXT,workId TEXT,status TEXT,body TEXT NOT NULL);
+      CREATE UNIQUE INDEX runs_workspace_active_v1 ON runs(workspaceId)
+        WHERE status IN ('dispatching','accepted','running','pause_requested','cancel_requested');
+      PRAGMA user_version=1;`);
+    insert(sql1,b);
+    insert(sql1,e);
+    assert.throws(()=>insert(sql1,c),/UNIQUE constraint failed: runs\.workspaceId/);
+  } finally {sql1.close();}
+
+  const first=new LoomStore(file);
+  try {
+    assert.deepEqual(first.getRun(b.id),{...b,lane:'investigation'});
+    assert.deepEqual(first.getRun(e.id),e);
+  } finally {first.close();}
+
+  const reopened=new LoomStore(file),sql2=new DatabaseSync(file);
+  try {
+    assert.equal(sql2.prepare('PRAGMA user_version').get().user_version,2);
+    assert.equal(sql2.prepare("SELECT name FROM sqlite_schema WHERE name='runs_workspace_active_v1'").get(),undefined);
+    insert(sql2,{...c,lane:'write'});
+    assert.deepEqual(reopened.recoverableRuns().map(run=>run.id),[b.id,e.id,c.id]);
+    assert.throws(()=>insert(sql2,{...b,id:'other-read',workId:'other-read',lane:'investigation'}),/UNIQUE constraint failed.*runs_workspace_lane_active_v2/);
+    assert.throws(()=>insert(sql2,{...c,id:'other-write',workId:'other-write',lane:'auxiliary-write'}),/UNIQUE constraint failed.*runs_workspace_lane_active_v2/);
+    assert.throws(()=>insert(sql2,{...e,id:'legacy-conflict',workId:'legacy-conflict',lane:'write'}),/UNIQUE constraint failed.*runs_workspace_lane_active_v2/);
+    sql2.prepare('UPDATE runs SET status=? WHERE id=?').run('completed',c.id);
+    assert.throws(()=>insert(sql2,{...c,id:'different-lane-same-work',workId:b.workId,lane:'write'}),/UNIQUE constraint failed: runs\.workId/);
+    assert.equal(sql2.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
+  } finally {sql2.close();reopened.close();}
 });

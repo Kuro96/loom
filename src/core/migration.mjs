@@ -1,10 +1,23 @@
 import { definitionSchema, requireValue } from './schema.mjs';
 
+export const activeRunSQL = "('dispatching','accepted','running','pause_requested','cancel_requested')";
+export const investigationConsentSQL = body => `json_extract(${body},'$.modelConsent.actor.kind')='host'
+  AND json_extract(${body},'$.modelConsent.actor.source')='readonly-investigation'`;
+export const runLaneSQL = body => `CASE json_extract(${body},'$.lane') WHEN 'investigation' THEN 'investigation' ELSE 'write' END`;
+
 // Called inside the store's schema transaction.
 export function migrate(db,permissionPreset) {
   const version=db.prepare('PRAGMA user_version').get().user_version;
-  requireValue(version<=1,`数据库版本${version}高于当前支持版本`,'MIGRATION_VERSION');
-  if(version===1) return;
+  requireValue(version<=2,`数据库版本${version}高于当前支持版本`,'MIGRATION_VERSION');
+  if(version===0) migrateLegacyWorkflows(db,permissionPreset);
+  if(version<2) db.exec(`UPDATE runs SET body=json_set(body,'$.lane','investigation') WHERE ${investigationConsentSQL('body')};
+    CREATE UNIQUE INDEX runs_workspace_lane_active_v2 ON runs(workspaceId,${runLaneSQL('body')}) WHERE status IN ${activeRunSQL};
+    CREATE UNIQUE INDEX runs_work_active_v2 ON runs(workId) WHERE status IN ${activeRunSQL};
+    DROP INDEX IF EXISTS runs_workspace_active_v1;
+    PRAGMA user_version=2;`);
+}
+
+function migrateLegacyWorkflows(db,permissionPreset) {
   const load=table=>db.prepare(`SELECT body FROM ${table} ORDER BY seq`).all().map(r=>JSON.parse(r.body));
   const workflows=load('workflows'),works=load('works'),runs=load('runs');
   const workIndex=new Map(works.map(w=>[w.id,w])),workflowIndex=new Map(workflows.map(w=>[w.id,w])),runIndex=new Map(runs.map(r=>[r.id,r]));
@@ -65,5 +78,4 @@ export function migrate(db,permissionPreset) {
     }
     update('runs',run);
   }
-  db.exec('PRAGMA user_version=1');
 }

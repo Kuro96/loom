@@ -22,10 +22,11 @@ const fact='Ledger Bin-B9, version v17';
 const missing='registry-index-77no-match';
 const batch='original-versioned-batch-31';
 
-for(const disposition of ['continue','pause','cancel']) test(`native read-only investigation after a session miss: ${disposition}`,{skip:!installed,timeout:30000},async()=>{
+for(const disposition of ['continue','pause','cancel']) test(`native read-only investigation after a session miss: ${disposition==='continue'?'overlap with one ordinary run':disposition}`,{skip:!installed,timeout:30000},async()=>{
   let original,foreign,source,search,dispatch,notSearched,wrongProject,wrongVersion,verified,blockedTool,blockedHelp,blockedValue,invocations=0;
   const investigation=Promise.withResolvers(), release=Promise.withResolvers(), continued=Promise.withResolvers(), consumed=Promise.withResolvers();
   const busEntered=Promise.withResolvers(), busRelease=Promise.withResolvers();
+  const cEntered=Promise.withResolvers(), cRelease=Promise.withResolvers(), dEntered=Promise.withResolvers();
   const host=await startupHost(async(wire,_req,res)=>{
     const last=wire.messages.at(-1),text=wireText(last);
     const contents=wire.messages.map(wireText);
@@ -66,6 +67,13 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
       }
       if(contents.some(value=>value.startsWith('任务：Existing accepted ledger'))) return report(res,'ledger',{kind:'result',summary:'Fixture ledger',outputs:{manifest:fact,batch}});
       if(contents.some(value=>value.startsWith('任务：Foreign ledger'))) return report(res,'foreign-ledger',{kind:'result',summary:'Foreign fixture ledger',outputs:{manifest:'Foreign sample'}});
+      if(contents.some(value=>value.startsWith('任务：Ordinary C holds the project slot'))) {
+        if(last.tool_call_id==='ordinary-c') return reply(res,{content:'C finished.'});
+        cEntered.resolve();await cRelease.promise;return report(res,'ordinary-c',{kind:'result',summary:'C finished',outputs:{}});
+      }
+      if(contents.some(value=>value.startsWith('任务：Ordinary D waits for the project slot'))) {
+        dEntered.resolve();return reply(res,{content:'D ran.'});
+      }
       const downstream=contents.find(value=>value.startsWith('任务：Use the verified manifest'));
       if(downstream!==undefined) {consumed.resolve(downstream);return reply(res,{content:'Consumed the verified manifest.'});}
 
@@ -125,11 +133,19 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
       }
       original=await create(workspaceId,'Resolve original manifest',{outputs:[{name:'manifest',required:true}],inputs:{checksum:{kind:'value',value:'original-17'},
         batch:{kind:'result',workId:source.id,output:'batch'}}});
+      let c,d;
       if(disposition==='continue') {
         await until(async()=>(await get(original.id)).status==='waiting','A is queued for coordination');
+        assert.deepEqual((await runs(original.id)).map(run=>run.status),['waiting']);
+        c=await create(workspaceId,'Ordinary C holds the project slot');
+        await deadline(cEntered.promise,'C enters a native model turn before B is created');
+        await until(async()=>(await get(c.id)).status==='running','C holds the project slot');
+        d=await create(workspaceId,'Ordinary D waits for the project slot');
         await rpc('tick');
         const {items}=await rpc('query',{kind:'event',workId:original.id});
         assert.equal(items.some(event=>event.type==='work.waitCoordination'),false);
+        assert.equal((await get(d.id)).status,'queued');
+        assert.deepEqual(await runs(d.id),[]);
         busRelease.resolve();
       }
       await until(()=>dispatch,'coordinator decision');
@@ -146,7 +162,7 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
         const [run]=await runs(childId);
         if(run?.finishedAt) assert.fail(JSON.stringify({run,wire:host.received.slice(-2).map(w=>w.messages.map(wireText))}));
         return false;
-      },'isolated native investigation');
+      },disposition==='continue'?'B must dispatch while ordinary C is still running':'isolated native investigation');
       const wire=await deadline(investigation.promise,'isolated native investigation');
       const prompt=wire.messages.map(wireText).join('\n');
       assert.deepEqual(wire.tools.map(item=>item.function.name),['loom_report']);
@@ -163,6 +179,21 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
       assert.equal(originalWait.wait.investigation.workId,child.id);
       const [bRun]=await runs(child.id),[aRun]=await runs(original.id);
       assert.equal(aRun.status,'waiting');
+      if(disposition==='continue') {
+        const [cRun]=await runs(c.id);
+        assert.equal(cRun.status,'running');
+        assert.ok(cRun.createdAt<=bRun.createdAt);
+        assert.equal(cRun.lane,'write');
+        assert.equal(bRun.lane,'investigation');
+        const reopened=new LoomStore(join(directory,'loom.sqlite'));
+        try {
+          assert.deepEqual(reopened.recoverableRuns().map(run=>run.id),[cRun.id,bRun.id]);
+          assert.equal(reopened.reserveRun(child.id).id,bRun.id);
+          assert.throws(()=>reopened.reserveRun(d.id),{code:'WORKSPACE_BUSY'});
+        } finally {reopened.close();}
+        assert.equal((await get(d.id)).status,'queued');
+        assert.deepEqual(await runs(d.id),[]);
+      }
       assert.notEqual(bRun.sessionId,aRun.sessionId);
       assert.notEqual(bRun.sessionId,source.sessionId);
       assert.notEqual(bRun.sessionId,busId);
@@ -187,13 +218,28 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
       assert.equal(received.data.message.isError,disposition==='pause');
       assert.equal(invocations,0);
       if(disposition==='continue') {
+        assert.equal(finished.status,'completed');
+        assert.equal(finished.lane,'investigation');
         assert.equal(finished.outputs.fact,fact);
+        const queuedA=await get(original.id);
+        assert.equal(queuedA.status,'queued');
+        assert.equal(queuedA.wait.handoff.investigation.runId,bRun.id);
+        await rpc('tick');
+        assert.deepEqual((await runs(original.id)).map(run=>run.id),[aRun.id]);
+        assert.equal((await runs(c.id))[0].status,'running');
+        assert.equal((await get(d.id)).status,'queued');
+        assert.deepEqual(await runs(d.id),[]);
+        cRelease.resolve();
         const resumed=await deadline(continued.promise,'A receives the verified fact');
         assert.match(resumed.messages.map(wireText).join('\n'),/Ledger Bin-B9, version v17/);
         assert.match(resumed.messages.map(wireText).join('\n'),/original-17/);
         const all=await runs(original.id);
         assert.equal(all.length,2);
         const [,resumedRun]=all;
+        assert.equal(resumedRun.lane,'write');
+        const [settledC]=await runs(c.id);
+        assert.equal(settledC.status,'completed');
+        assert.ok(settledC.finishedAt<=resumedRun.createdAt);
         assert.equal(resumedRun.sessionId,aRun.sessionId);
         assert.equal(resumedRun.operationId,aRun.operationId);
         assert.deepEqual(resumedRun.inputs,aRun.inputs);
@@ -208,6 +254,9 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
         assert.ok(host.ctx.agents.get(aRun.sessionId).session.snapshotEvents().some(event=>event.type==='user/message' && event.data.source.rpcId===resumedRun.requestId));
         const dependent=await create(workspaceId,'Use the verified manifest',{inputs:{manifest:{kind:'result',workId:original.id,output:'manifest'}}});
         const deliverable=await until(async()=>{const value=await get(original.id);return value.status==='review' && value;},'A produces the manifest');
+        await deadline(dEntered.promise,'D runs after the ordinary slot becomes free');
+        const [dRun]=await runs(d.id);
+        assert.ok((await runs(original.id))[1].finishedAt<=dRun.createdAt);
         assert.deepEqual(deliverable.result.outputs,{manifest:fact});
         assert.equal(deliverable.result.runId,resumedRun.id);
         assert.equal((await runs(dependent.id)).length,0);
@@ -225,5 +274,5 @@ for(const disposition of ['continue','pause','cancel']) test(`native read-only i
         assert.equal((await runs(original.id)).length,1);
       }
     } finally {await peer.dispose();}
-  } finally {release.resolve();busRelease.resolve();await host.close();}
+  } finally {release.resolve();busRelease.resolve();cRelease.resolve();await host.close();}
 });

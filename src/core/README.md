@@ -9,7 +9,7 @@
 - Work 是具体工作，保存输入、输出声明、模型与检查修订、创建时权限、授权、会话和结果。依赖可连接同一项目中的具体 Work。
 - 上游失败且同项目仍有排队消费者时，宿主按上游工作修订记录一次 `work.dependencyObserved`，引用该工作自己的失败 Run、结果版本及原生游标。事件是发现时的快照；当前受阻数由排队依赖关系计算。下游由既有调度器在依赖满足时启动，并固定本次消费的验收结果版本。
 - 内部 use 保存一次使用的提案、定义快照、参数及工作归组。状态为 `proposed/cancelled/confirmed`，用户确认后原子创建全部工作。每次新使用生成新 Work；返工沿用原 Work/session。
-- Run 保存一次执行的 requestId、prompt、实际输入、消费版本、候选报告及结果。新执行生成新的 Run/requestId，主会话保持。调度在调用原生投递前保存尝试次数和起始游标。外部读写故障在当前 Run 记录 `nativeFault` 和诊断，按有上限的间隔查询原回执。原会话的队列和事件用于对账；重投沿用原 requestId，最多发出三次，之后继续核对。停止状态以原生会话、队列和后台活动读回为准；待核对期间保持项目互斥。
+- Run 保存一次执行的 requestId、prompt、实际输入、消费版本、候选报告及结果。新执行生成新的 Run/requestId，主会话保持。调度在调用原生投递前保存尝试次数和起始游标。外部读写故障在当前 Run 记录 `nativeFault` 和诊断，按有上限的间隔查询原回执。原会话的队列和事件用于对账；重投沿用原 requestId，最多发出三次，之后继续核对。停止状态以原生会话、队列和后台活动读回为准；待核对期间继续占用原执行位。
 
 Workflow 的运行进度由 use 中的 Work 派生。定义更新作用于后续使用；已有 Work 的说明、范围、输入及定义知识快照保持。模型和检查有独立修订确认入口。
 
@@ -106,12 +106,12 @@ use.confirmation 为 `{actor,at,proposalVersion}`。用户确认同时创建精�
 
 ## 调度与结果版本
 
-- `readyWork(limit=20)`：每项目最多一项，要求 active 项目、queued Work、模型同意、关卡放行、依赖全部 accepted 及具名输入可解析。
-- `reserveRun(workId)`：同一判定下原子预留；已有活动 Run 返回原对象，同项目其他活动执行为 WORKSPACE_BUSY。不同项目可并行。
+- `readyWork(limit=20)`：每项目每个空闲执行位最多选一项，按 Work 创建顺序挑选。要求 active 项目、queued Work、模型同意、关卡放行、依赖全部 accepted 及具名输入可解析。
+- `reserveRun(workId)`：原子预留并将执行位固定在 `Run.lane`。具有宿主 `readonly-investigation` 同意来源及内部协查标记的工作使用 `investigation`；其他工作共用 `write`。同一 Work 已有活动 Run 时返回原对象；同项目同执行位已占用时返回 `WORKSPACE_BUSY`。
 - Run.inputs 保存解析后的值；consumedResults 保存 `{inputName,workId,runId,resultVersion,output,path,value}`。首次执行与实际返工在事务内核验上游验收与输出，缺失输出/路径为 NOT_READY；保留远端操作的恢复沿用上一 Run 的实际输入和消费版本。readyWork 与 reserveRun 共用输入选择逻辑，依赖验收、模型同意及人工关卡继续参与调度判定。
 - prompt 保存本次工作、项目知识、定义知识快照、依赖/关卡快照、检查、输入与来源版本，给出 operationId=work.id、输出声明和 loom_report 用法。
 - `markRunAccepted(runId,cursor)` 保存原生入箱事实。`updateRun(runId,patch)` 支持 cursor/status/running/diagnostic/observation/pendingInput/nativeFault/deliveryAttempts；`pendingInput` 是采样得到的原生 `approval`、`question`、`other` 类型数组。显式状态仅 dispatching/running，终态由专用接口收口。
-- `recoverableRuns()` 返回 dispatching/accepted/running/pause_requested/cancel_requested。这些状态持有项目执行锁；外部等待释放锁。
+- `recoverableRuns()` 返回 dispatching/accepted/running/pause_requested/cancel_requested。这些状态持有原执行位；外部等待释放执行位。SQLite 部分唯一索引分别约束每项目每执行位和每 Work 的活动 Run。
 
 游标是最后消费事件序号，初始 -1，须为大于等于 -1 的安全整数。更新取最大值，旧游标 observation 保持较新快照。Host 按 source.rpcId===run.requestId 核事件归属。Run 的 accepted 表示入箱，Work 的 accepted 表示验收。
 
@@ -176,7 +176,12 @@ categories 仅用于 work，取 pending/completed/interaction 数组，多选取
 
 ## SQLite 迁移
 
-首次新版打开在单事务内升级为 PRAGMA user_version=1，重复打开幂等。部署前保存一致性备份。
+首次新版打开在单事务内升级为 `PRAGMA user_version=2`，重复打开幂等。升级前停止旧宿主并保存一致性备份。
+
+- v2 用项目执行位索引和每 Work 活动索引替换项目单执行索引。旧协查按 Run 已保存的宿主同意来源补记 `lane: 'investigation'`；缺少执行位的旧 Run 计入 `write`，其记录保持原样。
+- v1 宿主拒绝打开 v2 库。原库回退须先停派发并完成原生对账，确认每项目至多一条活动 Run 后，才能在保留业务行的迁移事务中恢复 v1 索引和版本；也可在确认备份覆盖全部应保留记录时恢复升级前的一致性备份。
+
+v0 的历史工作流迁移仍在同一事务执行：
 
 - 有步骤旧 Workflow 保留 ID/version，转为 available 定义；完整旧对象保存为 legacySource。
 - 每个旧 Workflow 生成确定性 `legacy:<workflowId>` use，包含全部关联 Work（含阶段外手建工作），保留阶段映射。

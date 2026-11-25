@@ -1,11 +1,14 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID, createHash } from 'node:crypto';
-import { migrate } from './migration.mjs';
+import { activeRunSQL, investigationConsentSQL, migrate, runLaneSQL } from './migration.mjs';
 import { investigationSessionId } from './investigation.mjs';
 import { isUserCleanupCommand, definitionSchema, parameterValues, readPath, checksSchema, declarations, inputsSchema, bounded, reportSchema, documentSchema, zonedTime } from './schema.mjs';
 
 const tables = {work:'works',workflow:'workflows',run:'runs',event:'events',intent:'intents',workspace:'workspaces',control:'controls',use:'uses'};
-const activeRunSQL = "('dispatching','accepted','running','pause_requested','cancel_requested')";
+const workLaneSQL = `CASE WHEN json_type(w.body,'$.investigation')='object' AND ${investigationConsentSQL('w.body')}
+  THEN 'investigation' ELSE 'write' END`;
+const occupiedSlotSQL = `EXISTS(SELECT 1 FROM runs r WHERE r.workspaceId=w.workspaceId AND r.status IN ${activeRunSQL}
+  AND ${runLaneSQL('r.body')}=(${workLaneSQL}))`;
 const dependencyObserved='work.dependencyObserved';
 const launchAuthoritySQL = body => `(json_extract(${body},'$.modelConsent.actor.kind')='user' OR (
   json_extract(${body},'$.modelConsent.actor.kind')='host' AND json_extract(${body},'$.modelConsent.actor.source') IN ('bus-auto-start','readonly-investigation')))`;
@@ -117,8 +120,7 @@ export class LoomStore {
       CREATE INDEX IF NOT EXISTS runs_session ON runs(json_extract(body,'$.sessionId'),seq);
       CREATE INDEX IF NOT EXISTS works_session ON works(json_extract(body,'$.sessionId'),seq);
       CREATE UNIQUE INDEX IF NOT EXISTS works_session_active ON works(json_extract(body,'$.sessionId'))
-        WHERE status NOT IN ('accepted','cancelled','failed') AND json_extract(body,'$.sessionId') IS NOT NULL;
-      CREATE UNIQUE INDEX IF NOT EXISTS runs_workspace_active_v1 ON runs(workspaceId) WHERE status IN ${activeRunSQL};`);
+        WHERE status NOT IN ('accepted','cancelled','failed') AND json_extract(body,'$.sessionId') IS NOT NULL;`);
     });initialized=true;} finally {if(!initialized) this.#db.close();}
   }
   close() { this.#db.close(); }
@@ -147,11 +149,11 @@ export class LoomStore {
   readyWork(limit=20) {
     requireValue(Number.isInteger(limit) && limit>0 && limit<=200,'调度条数须为1至200');
     return this.#transaction(()=>{
-      const ready=[],workspaces=new Set();
-      const rows=this.#db.prepare(`SELECT w.body FROM works w WHERE ${readySQL}
-        AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.workspaceId=w.workspaceId AND r.status IN ${activeRunSQL}) ORDER BY w.seq`);
+      const ready=[],selected={write:new Set(),investigation:new Set()};
+      const rows=this.#db.prepare(`SELECT w.body,${workLaneSQL} AS lane FROM works w WHERE ${readySQL}
+        AND NOT ${occupiedSlotSQL} ORDER BY w.seq`);
       for(const row of rows.iterate()) {
-        const work=recordBody('work',row);
+        const work=recordBody('work',row),workspaces=selected[row.lane];
         if(workspaces.has(work.workspaceId) || this.#resolvedInputs(work)===null) continue;
         ready.push(work);workspaces.add(work.workspaceId);if(ready.length===limit) break;
       }
@@ -189,14 +191,15 @@ export class LoomStore {
       const work=this.#required('work',workId);
       const existing=this.#db.prepare(`SELECT body FROM runs WHERE workId=? AND status IN ${activeRunSQL}`).get(workId);
       if(existing) return JSON.parse(existing.body);
-      requireValue(!this.#db.prepare(`SELECT id FROM runs WHERE workspaceId=? AND status IN ${activeRunSQL}`).get(work.workspaceId),'工作区已有执行中的任务','WORKSPACE_BUSY');
+      const {lane,busy}=this.#db.prepare(`SELECT ${workLaneSQL} AS lane,${occupiedSlotSQL} AS busy FROM works w WHERE w.id=?`).get(workId);
+      requireValue(!busy,'工作区已有执行中的任务','WORKSPACE_BUSY');
       requireValue(this.#db.prepare(`SELECT id FROM works w WHERE w.id=? AND ${readySQL}`).get(workId),'任务尚未满足派发条件','NOT_READY');
       const workspace=this.#workspace(work.workspaceId);
       const workflow=work.definitionSnapshot;
       const resolved=this.#resolvedInputs(work);requireValue(resolved!==null,'工作输入尚未就绪','NOT_READY');
       work.sessionId??=`session-${randomUUID()}`;
       work.status='dispatching'; this.#saveWork(work);
-      const run={id:randomUUID(),workId,workspaceId:work.workspaceId,workflowId:work.workflowId,
+      const run={id:randomUUID(),workId,workspaceId:work.workspaceId,workflowId:work.workflowId,lane,
         sessionId:work.sessionId,requestId:randomUUID(),model:work.model,modelRevision:work.modelRevision,
         modelConsent:work.modelConsent,workVersion:work.version,permissionPreset:work.permissionPreset,
         checks:work.checks,checksRevision:work.checksRevision,checksConsent:work.checksConsent,
