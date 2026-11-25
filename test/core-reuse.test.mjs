@@ -30,6 +30,75 @@ function create(s,extra={}) {return s.command({type:'work.create',workspaceId:'a
 
 function approve(s,w,autoAccept=false) {return s.command({type:'work.confirm',workId:w.id,expectedVersion:w.version,autoAccept},user);}
 
+test('attention counts and pages only actionable work',t=>{
+  const f=fixture(t);let s=f.store;
+  const {use,works:[failed,paused,gated]}=confirm(s,propose(s,{parameters:{},definition:{title:'Attention',stages:[
+    {id:'failed',title:'Failed'},{id:'paused',title:'Paused'},{id:'gated',title:'Manual gate',manualGate:true}
+  ]}}));
+  const fault=s.reserveRun(failed.id);
+  s.finishRun(fault.id,{reason:'native-job-outcome-unknown',summary:'Missing native settlement',eventCursor:4});
+  const coordination=s.reserveRun(paused.id),report=waitReport(paused);
+  s.reportRun(coordination.id,report,source(coordination));
+  s.settleReport(coordination.id,{callId:'report',eventCursor:4,coordinate:true});
+  s.command({type:'work.pause',workId:paused.id,expectedVersion:s.getWork(paused.id).version},user);
+
+  const missing=approve(s,create(s)),missingRun=s.reserveRun(missing.id);
+  s.reportRun(missingRun.id,{kind:'help',summary:'Missing ledger',help:{missingInformation:'Which ledger?',attempted:'Checked inputs',expectedEvidence:'Ledger ID'}},source(missingRun));
+  s.settleReport(missingRun.id,{callId:'report',eventCursor:4});
+  const execution=create(s),reviewWork=approve(s,create(s));
+  result(s,reviewWork);
+  const other=create(s,{workspaceId:'b'});
+  s=f.reopen();
+
+  const query={kind:'work',workspaceId:'a',workflowId:null,categories:['interaction'],includeDecision:true,limit:1};
+  const first=s.query(query);
+  assert.deepEqual({total:first.total,ids:first.items.map(w=>w.id),decisions:first.decisions},{total:4,ids:[gated.id],decisions:['gate']});
+  const late=create(s);
+  let after=first.nextCursor;
+  for(const [work,decision] of [[missing,'external_input'],[execution,'execution'],[reviewWork,'result']]) {
+    assert.ok(after);
+    const page=s.query({...query,after});
+    assert.deepEqual({total:page.total,ids:page.items.map(w=>w.id),decisions:page.decisions},{total:4,ids:[work.id],decisions:[decision]});
+    after=page.nextCursor;
+  }
+  assert.equal(after,null);
+  assert.throws(()=>s.query({...query,workspaceId:'b',after:first.nextCursor}),{code:'INVALID_CURSOR'});
+  assert.equal(s.query({...query,workspaceId:'b'}).items[0].id,other.id);
+  assert.equal(s.query({...query,limit:50}).items.at(-1).id,late.id);
+  assert.deepEqual(s.getUse(use.id).progress,{total:3,completed:0,interaction:1,pending:2});
+  assert.deepEqual(s.query({kind:'work',useId:use.id,categories:['pending']}).items.map(w=>w.id),[failed.id,paused.id]);
+});
+
+test('attention follows current native question receipts and gives approval priority',t=>{
+  const f=fixture(t);let s=f.store;
+  const work=approve(s,create(s)),run=s.reserveRun(work.id);
+  const call={sessionId:run.sessionId,requestId:run.requestId,turn:1,step:0,callId:'question',callSeq:2};
+  const observation={admitted:true,ownedTurn:1,lastTurn:1,completion:null,questionCalls:[call]};
+  const continued={...call,asOfSeq:5,status:'continued'};
+  const update=(receipt,pendingInput=[],questionCalls=[call])=>s.updateRun(run.id,{status:'running',pendingInput,
+    observation:{...observation,questionCalls,questionReceipts:[receipt]}});
+  const query={kind:'work',categories:['interaction'],includeDecision:true};
+  const read=()=>s.query(query).decisions;
+  update(continued);
+  s=f.reopen();
+  assert.deepEqual(read(),['native_question']);
+  assert.equal(s.query(query).items[0].sessionId,run.sessionId);
+  update(continued,['approval']);
+  assert.deepEqual(read(),['native_approval']);
+  update({...continued,status:'settled',resultSeq:6,asOfSeq:6});
+  assert.deepEqual(read(),[]);
+  update(continued,[],[]);
+  assert.deepEqual(read(),[]);
+  const unowned={...call,requestId:'historical-request'};
+  update({...continued,requestId:unowned.requestId},[],[unowned]);
+  assert.deepEqual(read(),[]);
+  update(continued);
+  s.finishRun(run.id,{reason:'failed',summary:'Ended',eventCursor:7});
+  s.command({type:'work.rework',workId:work.id,feedback:'Retry'},user);
+  s.reserveRun(work.id);
+  assert.deepEqual(read(),[]);
+});
+
 test('definition use is proposed then confirmed atomically; repetitions isolate snapshots',t=>{
   const f=fixture(t);let s=f.store;
   const wf=s.command({type:'workflow.create',workspaceId:'a',...definition},agent);

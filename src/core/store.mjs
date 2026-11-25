@@ -23,14 +23,23 @@ const readySQL = `w.status='queued'
   AND EXISTS(SELECT 1 FROM workspaces s WHERE s.id=w.workspaceId AND json_extract(s.body,'$.active')=1)
   AND NOT EXISTS(SELECT 1 FROM json_each(w.body,'$.dependsOn') d
     LEFT JOIN works prerequisite ON prerequisite.id=d.value WHERE prerequisite.status IS NULL OR prerequisite.status!='accepted')`;
+const legacyNativeDiagnosticSQL=`CASE WHEN json_type(r.body,'$.pendingInput') IS NULL THEN r.body->>'diagnostic' END`;
+const nativeQuestionSQL=`EXISTS(SELECT 1 FROM json_each(r.body,'$.observation.questionReceipts') receipt
+  JOIN json_each(r.body,'$.observation.questionCalls') call
+    ON call.value->>'callSeq'=receipt.value->>'callSeq' AND call.value->>'callId'=receipt.value->>'callId'
+    AND call.value->>'turn'=receipt.value->>'turn' AND call.value->>'step'=receipt.value->>'step'
+    AND call.value->>'sessionId'=receipt.value->>'sessionId' AND call.value->>'requestId'=receipt.value->>'requestId'
+  WHERE receipt.value->>'status' IN ('open','continued') AND receipt.value->>'sessionId'=r.body->>'sessionId'
+    AND receipt.value->>'requestId'=r.body->>'requestId')`;
 const nativeDecisionSQL=`(SELECT CASE
-    WHEN json_type(r.body,'$.pendingInput') IS NULL THEN
-      CASE WHEN json_extract(r.body,'$.diagnostic') LIKE '等待原生交互：approval%' THEN 'native_approval'
-           WHEN json_extract(r.body,'$.diagnostic') LIKE '等待原生交互：%' THEN 'native_other' END
-    WHEN EXISTS(SELECT 1 FROM json_each(r.body,'$.pendingInput') WHERE value='approval') THEN 'native_approval'
-    WHEN EXISTS(SELECT 1 FROM json_each(r.body,'$.pendingInput') WHERE value='question') THEN 'native_question'
-    WHEN json_array_length(r.body,'$.pendingInput')>0 THEN 'native_other' END
-  FROM runs r WHERE r.workId=works.id AND r.status IN ('dispatching','accepted','running') ORDER BY r.seq DESC LIMIT 1)`;
+    WHEN EXISTS(SELECT 1 FROM json_each(r.body,'$.pendingInput') WHERE value='approval')
+      OR (${legacyNativeDiagnosticSQL}) LIKE '等待原生交互：approval%' THEN 'native_approval'
+    WHEN EXISTS(SELECT 1 FROM json_each(r.body,'$.pendingInput') WHERE value='question')
+      OR ${nativeQuestionSQL} THEN 'native_question'
+    WHEN json_array_length(r.body,'$.pendingInput')>0
+      OR (${legacyNativeDiagnosticSQL}) LIKE '等待原生交互：%' THEN 'native_other' END
+  FROM runs r WHERE r.workId=works.id AND r.workspaceId=works.workspaceId AND r.body->>'sessionId'=works.body->>'sessionId'
+    AND r.status IN ('dispatching','accepted','running') ORDER BY r.seq DESC LIMIT 1)`;
 const workDecisionSQL=`CASE
   WHEN status='awaiting_model' THEN 'execution'
   WHEN status IN ('queued','paused') AND (
@@ -44,9 +53,7 @@ const workDecisionSQL=`CASE
       LEFT JOIN works dependency ON dependency.id=d.value WHERE dependency.status IS NOT 'accepted') THEN 'gate'
   WHEN status IN ('dispatching','running') THEN ${nativeDecisionSQL}
   WHEN status='review' THEN 'result'
-  WHEN status='failed' THEN 'failed'
   WHEN status='paused' AND json_type(body,'$.wait.missingInformation')='text' THEN 'external_input'
-  WHEN status='paused' THEN 'resume'
   END`;
 const workCategorySQL=`CASE WHEN status IN ('accepted','cancelled') THEN 'completed'
   WHEN (${workDecisionSQL}) IS NOT NULL THEN 'interaction' ELSE 'pending' END`;

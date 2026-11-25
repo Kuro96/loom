@@ -165,10 +165,10 @@ categories 仅用于 work，取 pending/completed/interaction 数组，多选取
 | 分类 | 持久事实 |
 | --- | --- |
 | completed | accepted/cancelled |
-| interaction | 待核对执行、待放行且上游已验收、活动 Run 待原生交互、待验收、失败及暂停 |
-| pending | 其余，包括依赖等待、外部等待、排队、执行及停止收尾 |
+| interaction | 待授权执行、待放行且上游已验收、活动 Run 待原生交互、待验收、待补充外部信息 |
+| pending | 其余，包括依赖等待、外部等待、排队、执行、停止收尾，以及可在详情中继续或返工的工作 |
 
-分类 SQL 同时用于分页/计数及 use 进度。work 查询传 `includeDecision:true` 时，额外返回与 `items` 同序的 `decisions` 数组（无动作时为 null）。活动 Run 优先使用 `pendingInput`；未保存此字段的旧记录兼容诊断前缀。总览的待澄清请求以 `kind:intent,status:pending` 独立查询。Host snapshot 组合当前项目有界 use 页；总控详情分页及 queryMaxBytes 由 Host/上下文层管理。
+分类 SQL 同时用于分页/计数及 use 进度。待处理工作用 `kind:'work',categories:['interaction'],includeDecision:true` 查询；`decisions` 与 `items` 同序（无动作时为 null）。原生交互读取该工作及会话所属的最新活动 Run：原生审批优先，其余待答提问也可由仍归属当前调用的 `open`/`continued` 回执确定；用工作 `sessionId` 打开原生对话。未保存 `pendingInput` 的旧记录兼容诊断前缀。总览的待澄清请求以 `kind:intent,status:pending` 独立查询。Host snapshot 组合当前项目有界 use 页；总控详情分页及 queryMaxBytes 由 Host/上下文层管理。
 
 ## 持久控制回执
 
