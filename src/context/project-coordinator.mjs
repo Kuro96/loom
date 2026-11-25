@@ -41,7 +41,8 @@ function sameSelection(a,b) {
 }
 function sameWork(work,active) {
   return work!==null && (work.status===undefined || work.status==='waiting') && work.id===active.scope.workId && work.workspaceId===active.scope.workspaceId &&
-    work.version===active.scope.expectedVersion && work.sessionId===active.sessionId && work.wait?.operationId===active.operationId;
+    work.version===active.scope.expectedVersion && work.sessionId===active.sessionId && work.wait?.operationId===active.operationId &&
+    work.wait.coordination?.actionId===active.actionId;
 }
 
 export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,searchProjectSessions,executeDecision,config,signal}) {
@@ -248,9 +249,10 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
         const work=claim();
         if(work===null) return;
         const scope=Object.freeze({workId:work.id,workspaceId,expectedVersion:work.version});
-        if(work.workspaceId!==workspaceId || !work.wait?.operationId) throw identityError(agent.id);
+        const actionId=work.wait?.coordination?.actionId;
+        if(work.workspaceId!==workspaceId || !work.wait?.operationId || typeof actionId!=='string') throw identityError(agent.id);
         const {kind,help,remoteRef,operationId,supplements=[]}=work.wait;
-        const active={scope,operationId,sessionId:work.sessionId,selection,turn:null,admitted:false,decided:false,calls:new Map()};
+        const active={scope,operationId,actionId,sessionId:work.sessionId,selection,turn:null,admitted:false,decided:false,calls:new Map()};
         if(!sameWork(getWork(work.id),active)) throw contextError('CONFLICT','外部等待版本已变化');
         const latest=supplements.slice(-4);
         const preview=latest.map(value=>Array.from(value).slice(0,512).join(''));
@@ -258,7 +260,7 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
         const payload={...scope,operationId,...(typeof remoteRef==='string'?{remoteRef:remoteRef.slice(0,512)}:{}),
           ...(kind==='help'?{help}:{}),...answerPreview,sessionId:work.sessionId};
         const label=kind==='help'?'help':'external-wait';
-        active.message=createUserMessage({source:{kind:'loom-external-wait',...scope},content:[{type:'text',
+        active.message=createUserMessage({source:{kind:'loom-external-wait',...scope,actionId},content:[{type:'text',
           text:`[Loom ${label} reminder]\n${JSON.stringify(payload)}\n核对本项目相关线索，并以 work.resolveWait 提交协调结果。${answerPreview.supplementsTruncated?' 用户补充的完整内容见此工作 wait.supplements。':''}`}]});
         entry.active=active;
         agent.followup(active.message);

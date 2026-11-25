@@ -99,6 +99,16 @@ test('native project coordination keeps each project’s work results on its own
       assert.ok(JSON.stringify(wires[1]).includes(title));
       assert.equal(store.getWork(work.id).wait.handoff.actor.sessionId,id);
       assert.equal(store.getWork(work.id).status,'queued');
+      const {actionId}=store.getWork(work.id).wait.handoff;
+      assert.match(actionId,/^[0-9a-f-]{36}$/);
+      const events=store.query({kind:'event',workId:work.id}).items;
+      const submitted=events.find(event=>event.type==='work.waitCoordination');
+      const resolved=events.find(event=>event.type==='work.resolveWait');
+      assert.equal(submitted.detail.actionId,actionId);
+      assert.equal(resolved.detail.actionId,actionId);
+      const admission=host.ctx.agents.get(id).session.snapshotEvents().find(event=>event.type==='user/message' && event.data.source.kind==='loom-external-wait');
+      assert.equal(admission.data.source.actionId,actionId);
+      assert.equal(admission.data.source.expectedVersion,submitted.detail.version);
     }
   } finally {
     releaseControl.resolve();

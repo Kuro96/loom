@@ -416,11 +416,12 @@ export class LoomStore {
       if(work===null || work.status!=='waiting' || work.version!==version) return null;
       if(this.#get('workspace',work.workspaceId)?.active!==true) return null;
       if(zonedTime(work.wait.coordination?.retryAt??work.wait.nextCheckAt)>zonedTime(at)) return null;
+      const actionId=work.wait.coordination?.actionId??randomUUID();
       const attempt=(work.wait.coordination?.attempt??0)+1;
       const retryAt=new Date(zonedTime(at)+Math.min(30*60000,60000*2**Math.min(attempt-1,5))).toISOString();
-      work.wait={...work.wait,coordination:{attempt,retryAt}};
+      work.wait={...work.wait,coordination:{actionId,attempt,retryAt}};
       this.#saveWork(work);
-      this.#event('work.waitCoordination',work,{kind:'host'},{operationId:work.wait.operationId,attempt,retryAt});
+      this.#event('work.waitCoordination',work,{kind:'host'},{actionId,operationId:work.wait.operationId,version:work.version,sessionId:work.sessionId,attempt,retryAt});
       return work;
     });
   }
@@ -673,6 +674,7 @@ export class LoomStore {
       else if(input.type==='work.resolveWait') {
         const {operationId,handoff,condition,checkMethod,nextCheckAt,missingInformation}=target.wait;
         this.#event(input.type,target,actor,{version:target.version,operationId,action:input.action,sources:handoff.sources,
+          ...(handoff.actionId===undefined?{}:{actionId:handoff.actionId}),
           ...(input.action==='continue'?{information:handoff.information}:input.action==='ask'?{missingInformation}:{condition,checkMethod,nextCheckAt})});
       }
       else this.#event(input.type,target,actor,{version:target.version??null,
@@ -799,7 +801,7 @@ export class LoomStore {
       const sources=input.sources.map(value=>text(value,'线索来源'));
       requireValue(sources.every(value=>Buffer.byteLength(value)<=512),'线索来源超过512字节');
       const {coordination,nextCheckAt,missingInformation,pendingInformation,attempted,handoff,...reference}=work.wait;
-      const evidence={actor,at:timestamp,sources};
+      const evidence={actor,at:timestamp,sources,...(coordination.actionId===undefined?{}:{actionId:coordination.actionId})};
       if(input.action==='continue') {
         const information=text(input.information,'交接线索');requireValue(Buffer.byteLength(information)<=8192,'交接线索超过8KiB');
         work.wait={...reference,handoff:{...evidence,information}};work.status='queued';

@@ -82,6 +82,11 @@ test('进程在认领求助后退出，复查按原会话和版本恢复，取�
     const due=store.nextExternalWait(first.wait.coordination.retryAt,persisted.workspaceId);
     const claimed=store.claimExternalWait(due.id,due.version,first.wait.coordination.retryAt);
     assert.equal(claimed.wait.coordination.attempt,2);
+    const {actionId}=first.wait.coordination;
+    assert.match(actionId,/^[0-9a-f-]{36}$/);
+    assert.equal(claimed.wait.coordination.actionId,actionId);
+    const claims=store.query({kind:'event',workId:work.id}).items.filter(event=>event.type==='work.waitCoordination');
+    assert.deepEqual(claims.map(event=>[event.detail.actionId,event.detail.version]),[[actionId,first.version],[actionId,claimed.version]]);
     assert.equal(store.claimExternalWait(due.id,due.version,first.wait.coordination.retryAt),null);
     const coordinator={kind:'agent',sessionId:'coordination-agent'};
     store.command({type:'work.cancel',workId:work.id,expectedVersion:claimed.version},actor);

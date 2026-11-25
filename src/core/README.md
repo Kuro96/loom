@@ -137,7 +137,7 @@ source = {sessionId,requestId,turn,step,callId};
 - operationId 固定为 Work.id，远端引用/条件/原因须为非空文字。nextCheckAt 须是带时区有效日期，在报告时位于未来 30 天以内。
 - `settleReport(runId,{callId,eventCursor,coordinate})`：wait 或带 `uncertainty.followUp:{checkMethod,nextCheckAt}` 的回执定时等待；正式 Host 同时把无复查时间的 uncertain 交给总控立即协调。`attempted` 与 `missingInformation` 成对记录运行者核过的来源及缺口。总控确认确实缺信息后，待补信息使用 `work.resume {workId,expectedVersion,information}` 继续原操作。
 - `help` 用于缺少关键事实。`wait.source` 记录原 Run、session、工具步骤与轮次结束游标。`wait.originalOperation` 保存最初远端检查条件和用户补充，`wait.supplements` 保存后续补充；续办提示一并携带。
-- 宿主按项目以 `nextExternalWait(at,workspaceId)` 选到期工作，使用 `claimExternalWait` 保留认领版本与复查退避时间，再通知该项目的后台协调会话。`work.resolveWait` 验证协调会话、工作版本和操作 ID；可保存交接线索并排回队列、安排下次检查，或登记具体待补信息。下一 Run 采用同一 Work/session/operationId、原 inputs/consumedResults，并携带已查来源及线索。暂停、取消或改版会使未完成的协调决定过期。
+- 宿主按项目以 `nextExternalWait(at,workspaceId)` 选到期工作，使用 `claimExternalWait` 保存 `actionId`、认领版本及退避时间，再通知项目后台协调会话。同一未结算动作再次认领沿用其 `actionId`；认领、原生入轮与 `work.resolveWait` 决定各有记录。`work.resolveWait` 验证协调会话、工作版本和操作 ID；可保存交接线索并排回队列、安排下次检查，或登记具体待补信息。下一 Run 保留 Work/session/operationId、原 inputs/consumedResults 及已查来源。暂停、取消或改版使旧认领失效。
 
 核心保存候选。Host 核同归属 turn 正常结束、对应原生 tool/result 成功、会话 idle 且活动归零，再调用 finishRun/settleReport。Host 负责失败回执诊断、恢复成功事实重建及原生工具终结保护。取消 waiting 结束本地跟踪，保留远端引用供展示及对账。
 

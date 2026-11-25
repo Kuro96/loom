@@ -276,8 +276,10 @@ test('resumed coordination preserves its schedule and ignores stale wait decisio
   assert.equal(resumed.status,'waiting');assert.equal(resumed.wait.nextCheckAt,at);
   assert.equal(s.readyWork().length,0);
   const retry=s.claimExternalWait(w.id,resumed.version,at);
+  assert.notEqual(retry.wait.coordination.actionId,claim.wait.coordination.actionId);
   const queued=s.command({...resolution,expectedVersion:retry.version},agent,{coordinatorSessionId:agent.sessionId});
   assert.equal(queued.status,'queued');assert.equal(queued.wait.handoff.information,'Check Bin-B9');
+  assert.equal(queued.wait.handoff.actionId,retry.wait.coordination.actionId);
   assert.equal(s.reserveRun(w.id).sessionId,run.sessionId);
 });
 
@@ -286,15 +288,18 @@ test('external wait decisions retain their original evidence after another check
   const work=approve(s,create(s)),run=s.reserveRun(work.id),report=waitReport(work),due=report.wait.nextCheckAt;
   s.reportRun(run.id,report,source(run));s.settleReport(run.id,{callId:'report',eventCursor:5,coordinate:true});
   let claimed=s.claimExternalWait(work.id,s.getWork(work.id).version,due);
+  const firstAction=claimed.wait.coordination.actionId;
   const command={type:'work.resolveWait',workId:work.id,operationId:work.id};
   const nextCheckAt=new Date(Date.now()+120000).toISOString();
   s.command({...command,expectedVersion:claimed.version,action:'wait',condition:'Receipt arrives',checkMethod:'Read ledger',nextCheckAt,sources:['Project ledger']},agent,{coordinatorSessionId:agent.sessionId});
   claimed=s.claimExternalWait(work.id,s.getWork(work.id).version,nextCheckAt);
+  const nextAction=claimed.wait.coordination.actionId;
+  assert.notEqual(nextAction,firstAction);
   s.command({...command,expectedVersion:claimed.version,action:'ask',missingInformation:'Which ledger?',sources:['Original receipt']},agent,{coordinatorSessionId:agent.sessionId});
   s=f.reopen();
   const decisions=s.query({kind:'event',workId:work.id}).items.filter(event=>event.type==='work.resolveWait').map(({detail:{version,...decision}})=>decision);
-  assert.deepEqual(decisions,[{operationId:work.id,action:'wait',condition:'Receipt arrives',checkMethod:'Read ledger',nextCheckAt,sources:['Project ledger']},
-    {operationId:work.id,action:'ask',missingInformation:'Which ledger?',sources:['Original receipt']}]);
+  assert.deepEqual(decisions,[{operationId:work.id,actionId:firstAction,action:'wait',condition:'Receipt arrives',checkMethod:'Read ledger',nextCheckAt,sources:['Project ledger']},
+    {operationId:work.id,actionId:nextAction,action:'ask',missingInformation:'Which ledger?',sources:['Original receipt']}]);
 });
 
 test('repeated help preserves the original remote operation and each user supplement in the next run',t=>{
