@@ -48,11 +48,11 @@ async function initialize(ctx,config,bindingReady,directory,controlPath) {
     command:(request,actor)=>engine.command(request,{kind:'agent',...(actor?.sessionId?{sessionId:actor.sessionId}:{})}),
     modelCatalog:()=>ctx.sessionController.modelCatalog(),
     resolveBus:id=>ctx.sessionController.resolveAgent(id),
-    projectCoordination:{getWork,executeDecision(request,actor,scope){
+    projectCoordination:{getWork,executeDecision(request,actor,scope,waitEvidence){
       if(request.type!=='work.resolveWait' || request.workId!==scope.workId) throw contextError('FORBIDDEN','自动复查只能处理当前外部操作');
       const work=getWork(scope.workId);
       if(work===null || work.workspaceId!==scope.workspaceId || request.expectedVersion!==scope.expectedVersion || work.version!==scope.expectedVersion) throw contextError('CONFLICT','协调记录已变化');
-      return store.command(request,actor,{coordinatorSessionId:actor.sessionId});
+      return store.command(request,actor,{coordinatorSessionId:actor.sessionId,waitEvidence});
     }},
   });
   ctx.effect(()=>()=>context.dispose(),'loom: context');

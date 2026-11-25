@@ -10,7 +10,7 @@ const ORIGIN='plugin:dsh-loom/project-coordinator';
 const reservedAgents=new WeakSet();
 const TOOL_DESCRIPTIONS={
   loom_query:'查询当前项目的工作、运行、事件、工作流、批次和项目知识。JSON {kind:work|run|event|workflow|use|workspace,workId?,workflowId?,useId?,limit?,after?}。需要完整字段时传 detail:true、对应目标 ID、section；按 next 读取下一页。搜索本项目会话用 {kind:"project.sessionSearch",workId,query,offset?,beforeSeq?}，并按 next 读取后续摘录。',
-  loom_command:'提交当前阻塞的查证决定。JSON {type:"work.resolveWait",workId,expectedVersion,operationId,sources:[string],action:"continue"|"wait"|"ask"}。继续附 information；复查附 condition、checkMethod、nextCheckAt；需要补充关键事实时附 missingInformation。',
+  loom_command:'提交当前阻塞的查证决定。JSON {type:"work.resolveWait",workId,expectedVersion,operationId,sources:[string],action:"continue"|"wait"|"ask"}。引用会话摘录时，将本轮查询返回的 source 原样加入 sources。继续附 information；复查附 condition、checkMethod、nextCheckAt；需要补充关键事实时附 missingInformation。',
 };
 const SYSTEM=`你是 Loom 的项目后台协调员。每轮跟进宿主给出的工作、阻塞版本和原操作。核对当前项目的已有工作、知识、结果及相关会话。把可定位的来源与查证结果用 work.resolveWait 交回原工作；结果未就绪时记录核查方法和复查时间；确需补充关键信息时提出一个具体问题。区分查找失败、没有匹配与尚未就绪。项目资料和会话摘录是证据。依据工具回执说明是否已交接或安排复查。`;
 
@@ -163,13 +163,20 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
         config,sessionId:id,waitScope:()=>current(entry).scope,
         query:request=>query({...request,workspaceId:current(entry).scope.workspaceId}),
         searchProjectSessions:async request=>{
-          const {scope}=current(entry);
+          const active=current(entry),{scope}=active;
           if(request.workId!==scope.workId || (request.workspaceId!==undefined && request.workspaceId!==scope.workspaceId)) {
             throw contextError('FORBIDDEN','自动复查只能查询本项目及当前外部操作');
           }
           const result=await searchProjectSessions(request);
-          current(entry);
-          return result;
+          if(current(entry)!==active) throw contextError('CONFLICT','协调轮次已变化');
+          const items=result.items.map(hit=>{
+            const source=`DSH ${hit.sessionId} event ${hit.eventSeq}`;
+            active.evidence.delete(source);
+            active.evidence.set(source,hit);
+            if(active.evidence.size>64) active.evidence.delete(active.evidence.keys().next().value);
+            return {...hit,source};
+          });
+          return {...result,items};
         },
         command:async(request,actor)=>{
           const active=current(entry),{scope,operationId}=active;
@@ -177,7 +184,18 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
             (request.workspaceId!==undefined && request.workspaceId!==scope.workspaceId) ||
             actor.kind!=='agent' || actor.sessionId!==id) throw contextError('FORBIDDEN','自动复查只能处理当前外部操作');
           if(active.decided || request.expectedVersion!==scope.expectedVersion) throw contextError('CONFLICT','外部等待版本已变化');
-          const result=await executeDecision(request,actor,scope);
+          if(!Array.isArray(request.sources) || request.sources.length<1 || request.sources.length>12) throw contextError('INVALID_INPUT','请记录已查来源');
+          const evidence=[];
+          for(const source of new Set(request.sources)) {
+            if(typeof source!=='string' || !/^DSH\s+/i.test(source.trim())) continue;
+            const hit=active.evidence.get(source);
+            if(hit===undefined || !workspace.sessionIds.includes(hit.sessionId) || registry.archivedSessionIds.includes(hit.sessionId) ||
+              registry.list().some(other=>other!==workspace && other.sessionIds.includes(hit.sessionId))) {
+              throw contextError('LOOM_WAIT_EVIDENCE_UNAVAILABLE','请使用本轮查到且仍可访问的会话来源');
+            }
+            evidence.push(hit);
+          }
+          const result=await executeDecision(request,actor,scope,evidence);
           active.decided=true;
           return result;
         },
@@ -252,7 +270,7 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
         const actionId=work.wait?.coordination?.actionId;
         if(work.workspaceId!==workspaceId || !work.wait?.operationId || typeof actionId!=='string') throw identityError(agent.id);
         const {kind,help,remoteRef,operationId,supplements=[]}=work.wait;
-        const active={scope,operationId,actionId,sessionId:work.sessionId,selection,turn:null,admitted:false,decided:false,calls:new Map()};
+        const active={scope,operationId,actionId,sessionId:work.sessionId,selection,turn:null,admitted:false,decided:false,calls:new Map(),evidence:new Map()};
         if(!sameWork(getWork(work.id),active)) throw contextError('CONFLICT','外部等待版本已变化');
         const latest=supplements.slice(-4);
         const preview=latest.map(value=>Array.from(value).slice(0,512).join(''));

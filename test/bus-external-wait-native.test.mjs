@@ -20,10 +20,11 @@ for (const scenario of ['related','original','retry','missing','help']) test(`ex
   const found=scenario!=='missing';
   const help=scenario==='help';
   const phrase=help?'dataset manifest':'receipt-R17', clue=help?'dataset manifest verified in project ledger Bin-B9':'receipt-R17 moved to project ledger Bin-B9', foreign=`${phrase} unrelated project ledger Bin-X7`;
-  let work, firstWorker, clueSession, otherSession, otherWork, searchReply, busInput, unexpectedCommand, crossProject, allWorks, rejected=false;
+  let work, firstWorker, clueSession, otherSession, otherWork, searchReply, busInput, unexpectedCommand, crossProject, allWorks, chosen, foreignEvidence, rejected=false;
   const pages=[];
   if(scenario==='retry') t.mock.timers.enable({apis:['Date'],now:Date.now()});
   const worker=Promise.withResolvers();
+  const downstream=Promise.withResolvers();
   const mainEntered=Promise.withResolvers(), releaseMain=Promise.withResolvers();
   const host=await startupHost(async(wire,_req,res)=>{
     const message=wire.messages.at(-1), text=wireText(message);
@@ -33,13 +34,27 @@ for (const scenario of ['related','original','retry','missing','help']) test(`ex
       return reply(res,{content:'Visible coordinator finished.'});
     }
     if(names.includes('loom_report')) {
+      const input=wire.messages.filter(item=>item.role==='user').map(wireText).findLast(content=>content.startsWith('任务：'));
+      if(input?.startsWith('任务：Consume verified manifest')) {
+        downstream.resolve(input);
+        return reply(res,{content:'Manifest consumed.'});
+      }
       if(!firstWorker) {
         firstWorker=wire;
         if(help) return tool(res,'initial-help','loom_report',{report:{kind:'help',summary:'Dataset version needed',document:{english:'Dataset version needed.',chinese:'缺少数据集版本。'},help:{missingInformation:'Which dataset manifest is current?',attempted:'Checked the input list',expectedEvidence:'A version and its ledger entry'}}});
         return tool(res,'initial-uncertain','loom_report',{report:{kind:'uncertain',summary:'Original receipt location missing',document:{english:'The original location is obsolete.',chinese:'原位置停用。'},uncertainty:{operationId:work.id,remoteRef:phrase,reason:'Original location is obsolete',attempted:'Checked the original work conversation',missingInformation:'Where is the active receipt ledger?'}}});
       }
       worker.resolve(wire);
+      if(help) {
+        const record=input.split('\n').find(line=>line.startsWith('求助与交接记录：'));
+        const {handoff}=JSON.parse(record.slice('求助与交接记录：'.length));
+        const manifest=(handoff.evidence?.[0].snippet??handoff.information).match(/ledger (Bin-\w+)/)[1];
+        return tool(res,'manifest-result','loom_report',{report:{kind:'result',summary:`Manifest verified in ${manifest}`,document:{english:`Manifest verified in ${manifest}.`,chinese:`已在 ${manifest} 核对清单。`},outputs:{manifest}}});
+      }
       return reply(res,{content:'Read the original operation.'});
+    }
+    if(wire.messages.some(item=>wireText(item).includes('Independently pre-evaluate'))) {
+      return reply(res,{content:JSON.stringify({passed:true,summary:'Checked the manifest',evidence:['manifest Bin-B9']})});
     }
     if(wireText(wire.messages[0]).startsWith('Loom context review.')) return reply(res,{content:JSON.stringify({summary:'Receipt coordination in progress.',constraints:[],unresolved:[],references:[]})});
     if(!names.includes('loom_command')) return reply(res,{content:'Recorded.'});
@@ -59,15 +74,22 @@ for (const scenario of ['related','original','retry','missing','help']) test(`ex
       allWorks=text;
       return tool(res,'lookup-receipt','loom_query',{request:JSON.stringify({kind:'project.sessionSearch',workId:work.id,query:phrase})});
     }
+    const resolve=(id,match,source)=>tool(res,id,'loom_command',{request:JSON.stringify({type:'work.resolveWait',workId:work.id,
+      expectedVersion:searchReply.workVersion,operationId:work.id,action:match?'continue':'ask',
+      sources:[source??(match?.source??(match?`DSH ${match.sessionId} event ${match.eventSeq}`:'Project knowledge; project session search for receipt-R17 found no indexed hit'))],
+      ...(match?{information:match.snippet}:{missingInformation:'Which ledger now contains the R17 receipt?'})})});
+    if(message.tool_call_id==='foreign-evidence') {
+      foreignEvidence=text;
+      return resolve('resolve-receipt',chosen);
+    }
     if(message.tool_call_id.startsWith('lookup-receipt')) {
       if(!text.startsWith('{')) {searchReply={error:text};return reply(res,{content:'Search failed.'});}
       searchReply=JSON.parse(text);
       pages.push(searchReply);
       const match=searchReply.items.find(item=>item.sessionId===clueSession && item.snippet.includes('Bin-B9'));
       if(!match && searchReply.next) return tool(res,`lookup-receipt-${searchReply.next.beforeSeq ?? searchReply.next.offset}`,'loom_query',{request:JSON.stringify(searchReply.next)});
-      const sources=[match ? `DSH ${match.sessionId} event ${match.eventSeq}` : 'Project knowledge; project session search for receipt-R17 found no indexed hit'];
-      return tool(res,'resolve-receipt','loom_command',{request:JSON.stringify({type:'work.resolveWait',workId:work.id,expectedVersion:searchReply.workVersion,operationId:work.id,action:match?'continue':'ask',sources,
-        ...(match?{information:match.snippet}:{missingInformation:'Which ledger now contains the R17 receipt?'})})});
+      chosen=match;
+      return help && match ? resolve('foreign-evidence',match,`DSH ${otherSession} event ${match.eventSeq}`) : resolve('resolve-receipt',match);
     }
     return reply(res,{content:'Receipt follow-up recorded.'});
   });
@@ -120,7 +142,8 @@ for (const scenario of ['related','original','retry','missing','help']) test(`ex
         host.ctx.agents.get(busId).followup(createUserMessage({source:{kind:'user'},content:[{type:'text',text:'Hold the visible coordinator'}]}));
         await deadline(mainEntered.promise,'visible coordinator reached provider');
       }
-      work=await rpc('command',{type:'work.create',workspaceId,title:'Check the original shipment receipt',inputs:{checksum:{kind:'value',value:'sample-17'}},...(scenario==='original'?{sessionId:clueSession}:{})});
+      work=await rpc('command',{type:'work.create',workspaceId,title:'Check the original shipment receipt',inputs:{checksum:{kind:'value',value:'sample-17'}},
+        ...(help?{outputs:[{name:'manifest',required:true}]}:{}),...(scenario==='original'?{sessionId:clueSession}:{})});
       work=await rpc('command',{type:'work.confirm',workId:work.id,expectedVersion:work.version});
       const fetchWork=async()=>(await rpc('query',{kind:'work',workId:work.id})).items[0];
       const until=async predicate=>{for(let i=0;i<180;i++){const value=await fetchWork();if(predicate(value))return value;assert.ok(!searchReply?.error,searchReply?.error);if(found && value.status==='paused')break;await delay(50);}assert.fail(`The coordinator did not settle the wait: ${JSON.stringify(pages)}`);};
@@ -153,6 +176,16 @@ for (const scenario of ['related','original','retry','missing','help']) test(`ex
           assert.equal(runs[1].wait.help.expectedEvidence,'A version and its ledger entry');
           assert.equal(runs[1].wait.source.callId,'initial-help');
           assert.equal(Object.hasOwn(runs[1].wait,'remoteRef'),false);
+          assert.match(foreignEvidence,/本轮查到|已失效/);
+          const evidence={sessionId:chosen.sessionId,eventSeq:chosen.eventSeq,snippet:chosen.snippet};
+          assert.deepEqual(runs[1].wait.handoff.evidence,[evidence]);
+          assert.ok(resumed.messages.filter(item=>item.role==='user').some(item=>wireText(item).includes(JSON.stringify(evidence))));
+          const decisions=events.filter(event=>event.type==='work.resolveWait');
+          assert.equal(decisions.length,1);
+          assert.deepEqual(decisions[0].detail.evidence,[evidence]);
+          const finished=await until(value=>value.status==='review');
+          assert.deepEqual(finished.result.outputs,{manifest:'Bin-B9'});
+          assert.equal(finished.result.runId,runs[1].id);
           const local=await rpc('nativeSessions',{workspaceId});
           const global=await rpc('nativeSessions');
           assert.ok(local.items.some(({sessionId})=>sessionId===clueSession));
@@ -172,6 +205,20 @@ for (const scenario of ['related','original','retry','missing','help']) test(`ex
       assert.deepEqual(JSON.parse(allWorks).items.map(item=>item.id),[work.id]);
       assert.match(unexpectedCommand,/自动复查只能处理当前外部操作/);
       assert.equal((await rpc('query',{kind:'work',workspaceId})).total,1);
+      if(help) {
+        const input={kind:'result',workId:work.id,output:'manifest'};
+        let consumer=await rpc('command',{type:'work.create',workspaceId,title:'Consume verified manifest',inputs:{manifest:input}});
+        consumer=await rpc('command',{type:'work.confirm',workId:consumer.id,expectedVersion:consumer.version});
+        assert.equal((await rpc('query',{kind:'run',workId:consumer.id})).total,0);
+        const ready=await fetchWork();
+        await rpc('command',{type:'work.accept',workId:work.id,expectedVersion:ready.version,runId:ready.result.runId});
+        assert.match(await deadline(downstream.promise,'downstream receives the verified manifest'),/本次输入：\{"manifest":"Bin-B9"\}/);
+        const {items:[consumed]}=await rpc('query',{kind:'run',workId:consumer.id});
+        assert.equal(consumed.consumedResults.length,1);
+        assert.equal(consumed.consumedResults[0].runId,ready.result.runId);
+        assert.equal(consumed.consumedResults[0].resultVersion,ready.result.version);
+        assert.equal(consumed.consumedResults[0].value,'Bin-B9');
+      }
       assert.ok(searchReply,'The coordinator read the native project search result');
       if(scenario==='related') {
         assert.ok(pages.length>1 && pages[0].next.beforeSeq!==undefined);
