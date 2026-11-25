@@ -92,6 +92,27 @@ test('a project keeps its turn when two earlier projects have a continuous coord
   } finally {for(const hold of holds) hold.resolve();}
 });
 
+test('the scheduler records failed dependency evidence once across ticks and a store reopen',async t=>{
+  const f=fixture(t),run=f.reserve();
+  const failure=f.store.finishRun(run.id,{reason:'failed',summary:'Source unavailable',eventCursor:19});
+  const failed=f.store.getWork(run.workId);
+  const updated=f.store.command({type:'work.setChecks',workId:run.workId,expectedVersion:failed.version,checks:[]},actor);
+  const proposed=f.store.command({type:'work.create',workspaceId:run.workspaceId,title:'Review source',model,dependsOn:[run.workId]},actor);
+  const downstream=f.store.command({type:'work.confirm',workId:proposed.id,expectedVersion:proposed.version},actor);
+  const observations=()=>f.store.query({kind:'event',workId:run.workId,workspaceId:run.workspaceId}).items.filter(event=>event.type==='work.dependencyObserved');
+
+  await f.engine.tick();
+  const [observed]=observations();
+  assert.equal(observed?.actor.kind,'host');
+  assert.deepEqual(observed.detail,{workVersion:updated.version,sessionId:run.sessionId,runId:run.id,
+    resultVersion:failure.resultVersion,reason:failure.reason,eventCursor:failure.cursor,blockedWorks:1});
+  f.reopen();
+  await f.engine.tick();
+  assert.deepEqual(observations(),[observed]);
+  assert.deepEqual(f.store.getWork(downstream.id),downstream);
+  assert.equal(f.store.query({kind:'run',workId:downstream.id}).total,0);
+});
+
 test('pause while preparing prevents a later native prompt',async t=>{
   const f=fixture(t),run=f.reserve();
   const gate=boundary(async()=>({cursor:run.cursor,delivered:false}));

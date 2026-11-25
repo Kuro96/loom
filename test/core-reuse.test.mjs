@@ -168,6 +168,54 @@ test('result versions bind named inputs and immutable definition knowledge acros
   assert.deepEqual(s.getRun(first.id).outputs,{dataset:{id:'ds-A',items:[1,2]}});
 });
 
+test('a failed prerequisite is discoverable once per project until its retry frees the consumers',t=>{
+  const f=fixture(t);let s=f.store;
+  const upstream=approve(s,create(s,{title:'Publish manifest',outputs:[{name:'manifest',required:true}]}),true);
+  const downstream=approve(s,create(s,{inputs:{version:{kind:'result',workId:upstream.id,output:'manifest',path:['version']}}}));
+  const otherConsumer=approve(s,create(s,{dependsOn:[upstream.id]}));
+  const run=s.reserveRun(upstream.id);
+  const failedRun=s.finishRun(run.id,{reason:'failed',summary:'Manifest registry unavailable',eventCursor:5});
+  const previous=s.getWork(upstream.id);
+  s.command({type:'work.setChecks',workId:upstream.id,expectedVersion:previous.version,checks:[]},user);
+  s=f.reopen();
+  const failed=s.getWork(upstream.id);
+  assert.equal(failed.result,null);
+  assert.deepEqual(s.listDependencyBlockers('a'),[{workId:upstream.id,workspaceId:'a',workVersion:failed.version,
+    status:'failed',sessionId:run.sessionId,runId:run.id,resultVersion:failedRun.resultVersion,reason:failedRun.reason,eventCursor:failedRun.cursor,blockedWorks:2}]);
+  assert.deepEqual(s.listDependencyBlockers('b'),[]);
+  assert.throws(()=>s.reserveRun(downstream.id),{code:'NOT_READY'});
+  assert.equal(s.getWork(downstream.id).sessionId,null);
+  s.command({type:'work.cancel',workId:otherConsumer.id,expectedVersion:otherConsumer.version},user);
+  assert.equal(s.listDependencyBlockers('a')[0].blockedWorks,1);
+  s.command({type:'work.rework',workId:upstream.id,expectedVersion:failed.version,feedback:'Read the available registry'},user);
+  assert.deepEqual(s.listDependencyBlockers('a'),[]);
+  assert.deepEqual(s.readyWork().map(work=>work.id),[upstream.id]);
+  const retry=result(s,upstream,{manifest:{version:'V2'}});
+  assert.equal(retry.sessionId,run.sessionId);
+  const latest=s.getWork(upstream.id);
+  assert.equal(latest.status,'review');
+  assert.deepEqual(s.readyWork(),[]);
+  s.command({type:'work.accept',workId:upstream.id,runId:retry.id,expectedVersion:latest.version},user);
+  assert.deepEqual(s.readyWork().map(work=>work.id),[downstream.id]);
+  const consumed=s.reserveRun(downstream.id);
+  assert.deepEqual(consumed.inputs,{version:'V2'});
+  assert.deepEqual(consumed.consumedResults.map(({runId,resultVersion})=>({runId,resultVersion})),[{runId:retry.id,resultVersion:retry.resultVersion}]);
+});
+
+test('already observed prerequisite failures leave room for the next batch',t=>{
+  const f=fixture(t);let s=f.store;
+  const upstreams=['Old source','New source'].map(title=>{
+    const work=approve(s,create(s,{title})),run=s.reserveRun(work.id);
+    s.finishRun(run.id,{reason:'failed',summary:'Source unavailable',eventCursor:3});
+    approve(s,create(s,{dependsOn:[work.id]}));
+    return work.id;
+  });
+  assert.deepEqual(s.recordDependencyBlockers(1).map(event=>event.workId),upstreams.slice(0,1));
+  s=f.reopen();
+  assert.deepEqual(s.recordDependencyBlockers(1).map(event=>event.workId),upstreams.slice(1));
+  assert.deepEqual(s.recordDependencyBlockers(1),[]);
+});
+
 test('required outputs block acceptance; missing optional result paths block only consumers',t=>{
   const {store:s}=fixture(t);
   const upstream=approve(s,create(s,{outputs:[{name:'required',required:true},{name:'optional'}]}),true);

@@ -184,6 +184,8 @@ export class LoomEngine {
     const workspaces=this.native.workspaces();
     this.store.syncWorkspaces(workspaces);
     await this.control();
+    this.abort.signal.throwIfAborted();
+    this.store.recordDependencyBlockers();
     if(this.context.dispatchExternalWait) this.coordinateWaiting(workspaces);
     else this.store.wakeWaiting();
     for(const run of this.store.recoverableRuns()) {

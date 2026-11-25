@@ -5,6 +5,7 @@ import { isUserCleanupCommand, definitionSchema, parameterValues, readPath, chec
 
 const tables = {work:'works',workflow:'workflows',run:'runs',event:'events',intent:'intents',workspace:'workspaces',control:'controls',use:'uses'};
 const activeRunSQL = "('dispatching','accepted','running','pause_requested','cancel_requested')";
+const dependencyObserved='work.dependencyObserved';
 const launchAuthoritySQL = body => `(json_extract(${body},'$.modelConsent.actor.kind')='user' OR (
   json_extract(${body},'$.modelConsent.actor.kind')='host' AND json_extract(${body},'$.modelConsent.actor.source')='bus-auto-start'))`;
 const readySQL = `w.status='queued'
@@ -145,6 +146,32 @@ export class LoomStore {
       }
       return ready;
     },'DEFERRED');
+  }
+  listDependencyBlockers(workspaceId,limit=20) {
+    text(workspaceId,'项目ID');
+    requireValue(Number.isInteger(limit) && limit>0 && limit<=200,'依赖阻塞条数须为1至200');
+    return this.#dependencyBlockers(workspaceId,limit,0);
+  }
+  recordDependencyBlockers(limit=20) {
+    requireValue(Number.isInteger(limit) && limit>0 && limit<=200,'依赖阻塞条数须为1至200');
+    return this.#transaction(()=>this.#dependencyBlockers(null,limit,1).map(({workId,workVersion,sessionId,runId,resultVersion,reason,eventCursor,blockedWorks})=>
+      this.#event(dependencyObserved,this.#required('work',workId),{kind:'host'},{workVersion,sessionId,runId,resultVersion,reason,eventCursor,blockedWorks})));
+  }
+  #dependencyBlockers(workspaceId,limit,unobservedOnly) {
+    return this.#db.prepare(`SELECT p.id AS workId,p.workspaceId,p.status,
+      json_extract(p.body,'$.version') AS workVersion,
+      COALESCE(json_extract(r.body,'$.sessionId'),json_extract(p.body,'$.sessionId')) AS sessionId,
+      r.id AS runId,json_extract(r.body,'$.resultVersion') AS resultVersion,
+      json_extract(r.body,'$.reason') AS reason,json_extract(r.body,'$.cursor') AS eventCursor,COUNT(*) AS blockedWorks
+      FROM works w JOIN workspaces project ON project.id=w.workspaceId
+      JOIN json_each(w.body,'$.dependsOn') dependency
+      JOIN works p ON p.id=dependency.value AND p.workspaceId=w.workspaceId
+      LEFT JOIN runs r ON r.id=(SELECT latest.id FROM runs latest WHERE latest.workId=p.id
+        AND latest.workspaceId=p.workspaceId AND latest.status='failed' ORDER BY latest.seq DESC LIMIT 1)
+      WHERE (? IS NULL OR w.workspaceId=?) AND w.status='queued' AND p.status='failed' AND json_extract(project.body,'$.active')=1
+      AND (?=0 OR NOT EXISTS(SELECT 1 FROM events e WHERE e.workId=p.id AND e.workspaceId=p.workspaceId
+        AND json_extract(e.body,'$.type')=? AND json_extract(e.body,'$.detail.workVersion')=json_extract(p.body,'$.version')))
+      GROUP BY p.id ORDER BY p.seq LIMIT ?`).all(workspaceId,workspaceId,unobservedOnly,dependencyObserved,limit).map(row=>({...row}));
   }
   reserveRun(workId) {
     return this.#transaction(()=>{

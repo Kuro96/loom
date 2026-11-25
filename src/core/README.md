@@ -7,6 +7,7 @@
 - Workspace 是原生项目。`syncWorkspaces([{workspaceId,path,title}])` 接收完整 registry 快照；路径、名称或可用状态变化才提交和递增版本。缺席项目标记 `active:false`，保留业务记录及共享知识。
 - Workflow 是可复用定义，保存 `title/description/knowledge/parameters/stages/version`。普通定义为 `available`；迁移的空步骤来源为只读 `legacy`。
 - Work 是具体工作，保存输入、输出声明、模型与检查修订、创建时权限、授权、会话和结果。依赖可连接同一项目中的具体 Work。
+- 上游失败且同项目仍有排队消费者时，宿主按上游工作修订记录一次 `work.dependencyObserved`，引用该工作自己的失败 Run、结果版本及原生游标。事件是发现时的快照；当前受阻数由排队依赖关系计算。下游由既有调度器在依赖满足时启动，并固定本次消费的验收结果版本。
 - 内部 use 保存一次使用的提案、定义快照、参数及工作归组。状态为 `proposed/cancelled/confirmed`，用户确认后原子创建全部工作。每次新使用生成新 Work；返工沿用原 Work/session。
 - Run 保存一次执行的 requestId、prompt、实际输入、消费版本、候选报告及结果。新执行生成新的 Run/requestId，主会话保持。调度在调用原生投递前保存尝试次数和起始游标。外部读写故障在当前 Run 记录 `nativeFault` 和诊断，按有上限的间隔查询原回执。原会话的队列和事件用于对账；重投沿用原 requestId，最多发出三次，之后继续核对。停止状态以原生会话、队列和后台活动读回为准；待核对期间保持项目互斥。
 
