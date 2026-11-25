@@ -73,6 +73,10 @@ export async function querySummary(request,dependencies) {
     if(!dependencies.searchProjectSessions) throw contextError('LOOM_SESSION_SEARCH_UNAVAILABLE','原生会话搜索不可用');
     return assertQueryBudget(await dependencies.searchProjectSessions(request),config);
   }
+  if(request.kind==='project.githubRef') {
+    if(!dependencies.readProjectGithubRef) throw contextError('FORBIDDEN','此读取须由当前项目协调轮执行');
+    return assertQueryBudget(await dependencies.readProjectGithubRef(request),config);
+  }
   if(request.detail===true) return queryDetail(request,dependencies);
   if(request.kind==='rework') {
     const result=await query(request);
@@ -181,15 +185,15 @@ function toolRequest(args,name) {
 }
 function scopedWaitQuery(request,scope) {
   if(scope===null) return request;
-  if(request.kind==='project.sessionSearch' && request.workId===scope.workId) return request;
+  if(['project.sessionSearch','project.githubRef'].includes(request.kind) && request.workId===scope.workId) return request;
   if(['work','run','event','workflow','use','workspace'].includes(request.kind) &&
     (request.workspaceId===undefined || request.workspaceId===scope.workspaceId)) return {...request,workspaceId:scope.workspaceId};
   throw contextError('FORBIDDEN','自动复查只能查询本项目及当前外部操作');
 }
 
-export function createContextTools({defineTool,query,command,state,config,sessionId,stageDisplay,searchProjectSessions,waitScope=()=>null}) {
+export function createContextTools({defineTool,query,command,state,config,sessionId,stageDisplay,searchProjectSessions,readProjectGithubRef,waitScope=()=>null}) {
   return [
-    ['loom_query',QUERY_DESCRIPTION+' 外部等待时可查询 {kind:"project.sessionSearch",workId,query,offset?,beforeSeq?}，搜索本项目会话并返回有来源的摘录；next 非空时可原样查询下一页。',request=>querySummary(scopedWaitQuery(request,waitScope()),{query,state,config:config(),searchProjectSessions})],
+    ['loom_query',QUERY_DESCRIPTION+' 外部等待时可查询 {kind:"project.sessionSearch",workId,query,offset?,beforeSeq?}，搜索本项目会话并返回有来源的摘录；next 非空时可原样查询下一页。',request=>querySummary(scopedWaitQuery(request,waitScope()),{query,state,config:config(),searchProjectSessions,readProjectGithubRef})],
     ['loom_command',COMMAND_DESCRIPTION+REPORT_GUIDANCE+' work.resolveWait:{workId,expectedVersion,operationId,sources:[string],action:"continue"|"wait"|"ask",idempotencyKey?}。继续时附 information（交接给原工作会话）；复查时附 condition、checkMethod、nextCheckAt；只有关键线索缺失时用 ask 并附具体 missingInformation。',async request=>commandSummary(await command(request,{kind:'agent',sessionId}),config())],
     ['loom_focus','保存项目、工作、工作流焦点。JSON {workspaceId?,workflowId?,workId?,useId?,constraints?,references?,latestIntent?}。向用户发布可按序号指代的清单时，单独调用 {display:[{kind,id},...]}，按实际展示顺序传入项目(workspace)、工作(work)、工作流(workflow)或批次(use)。把返回的 text 原样作为最终回复；同一轮正式回复匹配后，编号才可引用。',async request=>{
       if(waitScope()!==null) throw contextError('FORBIDDEN','自动复查不更新用户会话焦点');

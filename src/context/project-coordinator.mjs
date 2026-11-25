@@ -46,7 +46,7 @@ function sameWork(work,active) {
     work.wait.coordination?.actionId===active.actionId;
 }
 
-export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,searchProjectSessions,executeDecision,config,signal}) {
+export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,searchProjectSessions,githubRef,executeDecision,config,signal}) {
   const {defineTool}=require('@deepseek-ai/dsh-tools');
   const {createUserMessage}=require('@deepseek-ai/dsh-llm');
   const {appendPluginRecord,pluginRecordOf}=require('@deepseek-ai/dsh-session');
@@ -147,7 +147,8 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
       const tools=createContextTools({
         defineTool:definition=>{
           if(!Object.hasOwn(TOOL_DESCRIPTIONS,definition.name)) return null;
-          const description=definition.name==='loom_command'?`${TOOL_DESCRIPTIONS.loom_command} ${INVESTIGATE}`:TOOL_DESCRIPTIONS[definition.name];
+          const description=definition.name==='loom_command'?`${TOOL_DESCRIPTIONS.loom_command} ${INVESTIGATE}`:
+            `${TOOL_DESCRIPTIONS.loom_query} 已配置的发布分支可用 {kind:"project.githubRef",workId} 读取当前提交。查询成功后在 sources 原样引用 source；查无记录、权限不足或暂时不可用时分别处理。`;
           return defineTool({...definition,description,async execute(args,exec){
             exec.signal.throwIfAborted();
             const {calls}=current(entry),call=calls.get(exec.callId);
@@ -164,6 +165,17 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
         },
         config,sessionId:id,waitScope:()=>current(entry).scope,
         query:request=>query({...request,workspaceId:current(entry).scope.workspaceId}),
+        readProjectGithubRef:async request=>{
+          const active=current(entry),{scope}=active;
+          if(request.workId!==scope.workId || (request.workspaceId!==undefined && request.workspaceId!==scope.workspaceId) ||
+            !Object.keys(request).every(key=>['kind','workId','workspaceId'].includes(key))) throw contextError('FORBIDDEN','自动复查只能查询本项目及当前外部操作');
+          if(githubRef===undefined) return {status:'forbidden'};
+          active.githubRead??=githubRef.read(getWork(scope.workId),lifetime);
+          const result=await active.githubRead;
+          if(current(entry)!==active) throw contextError('CONFLICT','协调轮次已变化');
+          if(result.status==='found') active.githubEvidence=result;
+          return result;
+        },
         searchProjectSessions:async request=>{
           const active=current(entry),{scope}=active;
           if(request.workId!==scope.workId || (request.workspaceId!==undefined && request.workspaceId!==scope.workspaceId)) {
@@ -196,7 +208,9 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
             (request.workspaceId!==undefined && request.workspaceId!==scope.workspaceId) ||
             actor.kind!=='agent' || actor.sessionId!==id) throw contextError('FORBIDDEN','自动复查只能处理当前外部操作');
           if(active.decided || request.expectedVersion!==scope.expectedVersion) throw contextError('CONFLICT','外部等待版本已变化');
+          const needsGithubReceipt=githubRef!==undefined && githubRef.requiresReceipt(getWork(scope.workId));
           if(request.action==='investigate') {
+            if(needsGithubReceipt) throw contextError('LOOM_WAIT_EVIDENCE_UNAVAILABLE','此工作须从已配置的发布分支查证');
             if(active.investigationSearch?.miss!==true) throw contextError('LOOM_INVESTIGATION_SEARCH','协查须先完成一次没有匹配项的项目会话搜索');
             const result=await executeDecision(request,actor,scope);
             active.decided=true;
@@ -204,8 +218,21 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
           }
           if(!Array.isArray(request.sources) || request.sources.length<1 || request.sources.length>12) throw contextError('INVALID_INPUT','请记录已查来源');
           const evidence=[];
+          let decision=request;
+          if(request.action==='continue' && needsGithubReceipt &&
+            (active.githubEvidence===undefined || !request.sources.includes(active.githubEvidence.source))) {
+            throw contextError('LOOM_WAIT_EVIDENCE_UNAVAILABLE','继续前须引用本轮查到的发布分支来源');
+          }
           for(const source of new Set(request.sources)) {
-            if(typeof source!=='string' || !/^DSH\s+/i.test(source.trim())) continue;
+            if(typeof source!=='string') continue;
+            if(/^GitHub\b/i.test(source.trim())) {
+              const read=active.githubEvidence;
+              if(read===undefined || read.source!==source) throw contextError('LOOM_WAIT_EVIDENCE_UNAVAILABLE','请使用本轮查到的发布分支来源');
+              evidence.push(read.evidence);
+              if(request.action==='continue') decision={...request,information:`${read.evidence.repository} ${read.evidence.ref}：${read.evidence.sha}`};
+              continue;
+            }
+            if(!/^DSH\s+/i.test(source.trim())) continue;
             const hit=active.evidence.get(source);
             if(hit===undefined || !workspace.sessionIds.includes(hit.sessionId) || registry.archivedSessionIds.includes(hit.sessionId) ||
               registry.list().some(other=>other!==workspace && other.sessionIds.includes(hit.sessionId))) {
@@ -213,7 +240,7 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
             }
             evidence.push(hit);
           }
-          const result=await executeDecision(request,actor,scope,evidence);
+          const result=await executeDecision(decision,actor,scope,evidence);
           active.decided=true;
           return result;
         },

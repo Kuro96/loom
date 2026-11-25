@@ -7,6 +7,7 @@ import {previewTarget} from './host/report-preview.mjs';
 import {draftFromManual, generateManualDraft} from './host/manual-workflow.mjs';
 import { createLoomContext } from './context/index.mjs';
 import {contextError} from './context/budget.mjs';
+import {githubRefReader} from './host/github-ref.mjs';
 import {loomDirectory} from './bootstrap.mjs';
 
 export const name='loom';
@@ -48,7 +49,7 @@ async function initialize(ctx,config,bindingReady,directory,controlPath) {
     command:(request,actor)=>engine.command(request,{kind:'agent',...(actor?.sessionId?{sessionId:actor.sessionId}:{})}),
     modelCatalog:()=>ctx.sessionController.modelCatalog(),
     resolveBus:id=>ctx.sessionController.resolveAgent(id),
-    projectCoordination:{getWork,executeDecision(request,actor,scope,waitEvidence){
+    projectCoordination:{getWork,githubRef:githubRefReader(config.githubRef),executeDecision(request,actor,scope,waitEvidence){
       if(request.type!=='work.resolveWait' || request.workId!==scope.workId) throw contextError('FORBIDDEN','自动复查只能处理当前外部操作');
       const work=getWork(scope.workId);
       if(work===null || work.workspaceId!==scope.workspaceId || request.expectedVersion!==scope.expectedVersion || work.version!==scope.expectedVersion) throw contextError('CONFLICT','协调记录已变化');
