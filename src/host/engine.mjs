@@ -5,6 +5,8 @@ import { runChecks } from './checks.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { isAcceptanceFailure } from '../context/acceptance.mjs';
 import { redact } from '../context/budget.mjs';
+import { isProjectCoordinatorSessionId } from '../context/project-coordinator.mjs';
+import { isInvestigationSessionId } from '../core/investigation.mjs';
 
 const MAX_DELIVERIES=3;
 const MAX_PROJECT_COORDINATORS=2;
@@ -33,7 +35,8 @@ export class LoomEngine {
       if(['pause_requested','paused','cancel_requested','waiting'].includes(work.status)) return {kind:'reject'};
       const consent=work.modelConsent;
       const approved=work.model!==null && consent!==null && (consent.actor.kind==='user' ||
-        consent.actor.kind==='host' && consent.actor.source==='bus-auto-start') &&
+        consent.actor.kind==='host' && (consent.actor.source==='bus-auto-start' ||
+          consent.actor.source==='readonly-investigation' && work.investigation!==undefined)) &&
         consent.modelRevision===work.modelRevision && sameModel(consent.model,work.model) && sameModel(payload.modelSelection,work.model);
       if(!approved) {
         if(['dispatching','running'].includes(work.status)) {
@@ -126,7 +129,9 @@ export class LoomEngine {
     if(work===null || work.status!=='waiting' || !work.wait.coordination) throw invalid('工作当前没有待协调的外部操作','INVALID_STATE');
     const project=this.ctx.workspaceRegistry.get(work.workspaceId), provider=this.ctx.get('sessionQuery');
     if(!project || !provider) throw invalid('项目会话搜索不可用','LOOM_SESSION_SEARCH_UNAVAILABLE');
-    const ids=[...new Set(project.sessionIds)].reverse(), offset=request.offset??0, {beforeSeq}=request;
+    // Tool-call arguments are indexed as assistant text, including the coordinator's search term itself.
+    const ids=[...new Set(project.sessionIds)].filter(id=>!isProjectCoordinatorSessionId(id) && !isInvestigationSessionId(id)).reverse();
+    const offset=request.offset??0, {beforeSeq}=request;
     if(!Number.isSafeInteger(offset) || offset<0 || offset>ids.length || (beforeSeq!==undefined && (!Number.isSafeInteger(beforeSeq)||beforeSeq<0))) throw invalid('会话搜索位置无效','INVALID_INPUT');
     const signal=AbortSignal.any([this.abort.signal,AbortSignal.timeout(10000)]);
     const filters=[{kind:'type',values:['user/message','assistant/message']},{kind:'surface',values:['current']},{kind:'text',text:request.query.trim()}];
@@ -251,11 +256,13 @@ export class LoomEngine {
   async dispatchRun(runId,signal) {
     let current=this.currentRun(runId,signal);
     if(current===null) return;
+    if(!current.run.deliveryAttempts && this.rejectStaleInvestigation(current)) return;
     const prepared=await this.native.prepare(current.work,current.run);
     current=this.currentRun(runId,signal);
     if(current===null) return;
     const {run}=current;
     if(!prepared.delivered) {
+      if(this.rejectStaleInvestigation(current)) return;
       const attempts=run.deliveryAttempts??0;
       if(attempts>=MAX_DELIVERIES) throw new NativeRunFailure('核对原投递','RECEIPT_UNCONFIRMED',new Error('已用完自动投递次数，仍待确认原请求'));
       this.store.updateRun(run.id,{cursor:prepared.cursor,deliveryAttempts:attempts+1});
@@ -265,6 +272,12 @@ export class LoomEngine {
       if(receipt.accepted!==true) throw new Error('原生投递回执格式无效');
     }
     this.store.markRunAccepted(run.id,prepared.cursor);
+  }
+
+  rejectStaleInvestigation({work,run}) {
+    if(work.investigation===undefined || this.store.canDispatchInvestigation(work,run)) return false;
+    this.store.finishRun(run.id,{reason:'investigation-stale',summary:'协查或来源版本已变化',eventCursor:run.cursor});
+    return true;
   }
 
   currentRun(runId,signal) {
@@ -424,6 +437,11 @@ export class LoomEngine {
     }
     const candidate=current.run.reports.findLast(({source})=>source.sessionId===run.sessionId && source.requestId===run.requestId && source.turn===completion.turn &&
       observation.reportReceipts.some(receipt=>sameReportInvocation(receipt,source) && receipt.isError===false && receipt.seq<completion.endSeq));
+    if(current.work.investigation!==undefined) {
+      this.store.finishRun(run.id,{reason:completion.reason,summary:completion.summary,eventCursor:completion.endSeq,
+        ...(candidate===undefined?{}:{reportCallId:candidate.source.callId})});
+      return;
+    }
     if(candidate===undefined && (current.run.reports.length || current.work.outputs.length)) {
       const evidence=current.run.reports.map(({source})=>({source,receipt:observation.reportReceipts.find(receipt=>sameReportInvocation(receipt,source))??null}));
       const message=evidence.length?'工作报告回执未确认：'+evidence.map(({source,receipt})=>`${source.callId}@${source.turn} ${receipt?.isError===true?'原生工具失败':'缺少所属轮次成功回执'}`).join('；'):'工作声明了输出，但缺少成功报告';

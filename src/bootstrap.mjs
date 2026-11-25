@@ -4,6 +4,7 @@ import {existsSync} from 'node:fs';
 import {DatabaseSync} from 'node:sqlite';
 import {guardAgent} from './context/binding.mjs';
 import {isProjectCoordinatorSessionId} from './context/project-coordinator.mjs';
+import {isInvestigationSessionId} from './core/investigation.mjs';
 export const name='loom-bootstrap';
 export const inject=[];
 export function loomDirectory(config={}) {
@@ -28,7 +29,8 @@ export function apply(ctx,config={}) {
     return database.prepare("SELECT 1 FROM works WHERE json_extract(body,'$.sessionId')=? LIMIT 1").get(agent.id)!==undefined;
   };
   ctx.effect(()=>()=>{if(database!==null)database.close();},'loom: worker identity lookup');
-  const matches=agent=>isProjectCoordinatorSessionId(agent.id) || (agent.session.header.cwd!==undefined && resolve(agent.session.header.cwd)===controlPath) || workerSession(agent);
+  const matches=agent=>isProjectCoordinatorSessionId(agent.id) || isInvestigationSessionId(agent.id) ||
+    (agent.session.header.cwd!==undefined && resolve(agent.session.header.cwd)===controlPath) || workerSession(agent);
   ctx.on('agent/created',async({agent})=>{
     if(!matches(agent)) return;
     const binding=guardAgent(agent);

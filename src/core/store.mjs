@@ -1,13 +1,14 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID, createHash } from 'node:crypto';
 import { migrate } from './migration.mjs';
+import { investigationSessionId } from './investigation.mjs';
 import { isUserCleanupCommand, definitionSchema, parameterValues, readPath, checksSchema, declarations, inputsSchema, bounded, reportSchema, documentSchema, zonedTime } from './schema.mjs';
 
 const tables = {work:'works',workflow:'workflows',run:'runs',event:'events',intent:'intents',workspace:'workspaces',control:'controls',use:'uses'};
 const activeRunSQL = "('dispatching','accepted','running','pause_requested','cancel_requested')";
 const dependencyObserved='work.dependencyObserved';
 const launchAuthoritySQL = body => `(json_extract(${body},'$.modelConsent.actor.kind')='user' OR (
-  json_extract(${body},'$.modelConsent.actor.kind')='host' AND json_extract(${body},'$.modelConsent.actor.source')='bus-auto-start'))`;
+  json_extract(${body},'$.modelConsent.actor.kind')='host' AND json_extract(${body},'$.modelConsent.actor.source') IN ('bus-auto-start','readonly-investigation')))`;
 const readySQL = `w.status='queued'
   AND json_extract(w.body,'$.modelConsent.modelRevision')=json_extract(w.body,'$.modelRevision')
   AND ${launchAuthoritySQL('w.body')}
@@ -58,6 +59,12 @@ function canonical(value) {
   return value;
 }
 const fingerprint = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+function approvedModel(run,model) {
+  const consent=run.modelConsent;
+  return consent!==null && consent!==undefined && (consent.actor.kind==='user' ||
+    consent.actor.kind==='host' && consent.actor.source==='bus-auto-start') &&
+    consent.modelRevision===run.modelRevision && fingerprint(run.model)===fingerprint(model) && fingerprint(consent.model)===fingerprint(model);
+}
 function hasReviewEvidence(review) {
   return review?.passed===true && review.evidence!==null && Object.keys(review.evidence).length>0;
 }
@@ -116,6 +123,10 @@ export class LoomStore {
   }
   close() { this.#db.close(); }
   #resolvedInputs(work) {
+    if(work.investigation!==undefined) {
+      const value=work.inputs.manifest.value;
+      return {inputs:{manifest:value},consumedResults:[{inputName:'manifest',...work.investigation.source,path:[],value}]};
+    }
     if(work.wait!==null) {
       const row=this.#db.prepare('SELECT body FROM runs WHERE workId=? ORDER BY seq DESC LIMIT 1').get(work.id);
       const run=JSON.parse(row.body);
@@ -203,6 +214,7 @@ export class LoomStore {
       run.prompt+='\n外部等待请记录原操作引用、完成条件及下次核对时间。缺少关键事实时，用 help 说明缺口、已查来源和所需证据。';
       if(work.wait?.remoteRef) run.prompt+=`\n恢复操作须先核原操作状态，继续同一operationId；总控交接和用户补充是核对线索，不是变更范围或重复提交的授权。\n现有外部操作记录：${JSON.stringify(work.wait)}`;
       else if(work.wait?.kind==='help') run.prompt+=`\n按当前工作范围查证并继续。\n求助与交接记录：${JSON.stringify(work.wait)}`;
+      if(work.investigation!==undefined) run.prompt=`[Loom investigation]\n读取固定文本输出，将原值作为 loom_report 的 outputs.fact 提交。\n本次输入：${JSON.stringify(run.inputs)}`;
       this.#put('run',run); this.#event('run.reserved',run,{kind:'host'},{runId:run.id,requestId:run.requestId});
       return run;
     });
@@ -272,6 +284,14 @@ export class LoomStore {
         return run;
       }
       requireValue(['dispatching','accepted','running'].includes(run.status),'当前运行须先完成停止对账','INVALID_STATE');
+      let verification=null;
+      if(work.investigation!==undefined) {
+        verification=this.#verifyInvestigation(work,run,reason,reportCallId);
+        reason=verification===null?'investigation-unconfirmed':'completed';
+        summary=verification===null?'协查未取得当前有效的原生结果':'已核实固定版本的文本输出';
+        reportCallId=verification===null?undefined:reportCallId;
+        review={passed:verification!==null,summary,source:'native-investigation',evidence:verification===null?[]:verification};
+      }
       let outputs={},deliverables=[];
       if(reportCallId!==undefined) {
         const candidate=run.reports.find(c=>c.source.callId===reportCallId);
@@ -289,7 +309,7 @@ export class LoomStore {
       run.verificationPassed=reason==='completed' && hasReviewEvidence(review) && checksPassed(run,checks) && this.#outputsComplete(work,outputs);
       const authorization=work.authorization;
       const automaticHandoff=authorization?.actor.kind==='host' && authorization.actor.source==='bus-auto-start' && deliverables.length===0;
-      if(authorization?.autoAccept && (authorization.actor.kind==='user' || automaticHandoff) && run.verificationPassed) {
+      if(authorization?.autoAccept && (authorization.actor.kind==='user' || automaticHandoff || verification!==null) && run.verificationPassed) {
         work.status='accepted';
         work.result.acceptance={mode:'work',actor:work.authorization.actor,authorization:work.authorization,
           at:now(),runId,workVersion:work.version,resultVersion:work.result.version};
@@ -297,6 +317,7 @@ export class LoomStore {
       }
       this.#saveWork(work); this.#put('run',run);
       this.#event('run.finished',run,{kind:'host'},{runId,reason,cursor:run.cursor});
+      if(work.investigation!==undefined) this.#returnInvestigation(work,run,verification);
       return run;
     });
   }
@@ -362,11 +383,114 @@ export class LoomStore {
       if(previous) {requireValue(fingerprint({report,source})===fingerprint({report:previous.report,source:previous.source}),'工具调用已有不同报告','CONFLICT');return previous;}
       requireValue(['dispatching','accepted','running'].includes(run.status),'当前运行不接受报告','INVALID_STATE');
       requireValue(run.reports.length<20,'运行报告候选最多20项','INVALID_INPUT');
-      reportSchema(report,this.#required('work',run.workId));
+      const work=this.#required('work',run.workId);
+      if(work.investigation!==undefined) {
+        requireValue(this.canDispatchInvestigation(work,run),'协查或来源版本已变化','CONFLICT');
+        requireValue(report.kind==='result' && !report.deliverables?.length,'协查仅接受文本结果报告');
+        requireValue(report.outputs && report.outputs.fact===run.inputs.manifest,'结果须与固定版本的证据一致');
+      }
+      reportSchema(report,work);
       const candidate={report,source};run.reports.push(candidate);this.#put('run',run);
       this.#event('run.reported',run,{kind:'host'},{runId,callId:source.callId,kind:report.kind});return candidate;
     });
   }
+  #investigationSource(workspaceId,pin) {
+    const work=this.#get('work',pin.workId);
+    if(work===null || work.workspaceId!==workspaceId || work.investigation!==undefined) return null;
+    const result=work.result;
+    if(work.status!=='accepted' || !result?.acceptance || result.runId!==pin.runId || result.version!==pin.resultVersion ||
+      !work.outputs.some(output=>output.name===pin.output) || !Object.hasOwn(result.outputs,pin.output)) return null;
+    const run=this.#get('run',pin.runId), value=result.outputs[pin.output];
+    if(run===null || run.workId!==work.id || run.workspaceId!==workspaceId || run.status!=='completed' || run.resultVersion!==pin.resultVersion ||
+      typeof value!=='string' || !value.trim() || Buffer.byteLength(value)>2048 || run.outputs[pin.output]!==value) return null;
+    return {run,value};
+  }
+
+  startInvestigation(input,actor) {
+    requireValue(actor.kind==='agent' && typeof actor.sessionId==='string','协查须由当前项目协调员安排','FORBIDDEN');
+    requireValue(Object.keys(input).every(key=>['type','workId','expectedVersion','operationId','action','source'].includes(key)),'协查参数无效');
+    const pin=input.source;
+    requireValue(pin && typeof pin==='object' && Object.keys(pin).length===4 && ['workId','runId','output'].every(key=>typeof pin[key]==='string' && pin[key]) &&
+      Number.isSafeInteger(pin.resultVersion) && pin.resultVersion>0,'协查须提供确切的工作、运行、结果版本和输出名称');
+    return this.#transaction(()=>{
+      const parent=this.#required('work',input.workId); this.#version(parent,input,true);
+      const wait=parent.wait;
+      requireValue(parent.status==='waiting' && wait?.kind==='help' && wait.operationId===input.operationId && typeof wait.coordination?.actionId==='string',
+        '当前求助或协调版本已变化','CONFLICT');
+      requireValue(parent.investigation===undefined && wait.investigation===undefined,'这次求助已有协查','CONFLICT');
+      this.#workspace(parent.workspaceId);
+      const original=this.#required('run',wait.source.runId);
+      requireValue(original.status==='waiting' && original.workId===parent.id && original.workspaceId===parent.workspaceId && original.sessionId===parent.sessionId &&
+        original.requestId===wait.source.requestId && original.reportCallId===wait.source.callId,'原工作尚未完成安全让位','CONFLICT');
+      const source=this.#investigationSource(parent.workspaceId,pin);
+      requireValue(source!==null,'来源须为本项目已验收的固定版本文本输出','INVALID_SOURCE');
+      requireValue(parent.model!==null && approvedModel(parent,parent.model) && approvedModel(original,parent.model) && approvedModel(source.run,parent.model),
+        '协查须沿用原工作和来源运行已经批准的同一模型','FORBIDDEN');
+      const child=this.#newWork({workspaceId:parent.workspaceId,title:'核实已验收的文本输出',model:parent.model,permissionPreset:null,
+        inputs:{manifest:{kind:'value',value:source.value}},outputs:[{name:'fact',required:true}]});
+      child.sessionId=investigationSessionId(child.id);
+      const {coordination,nextCheckAt,...reference}=wait;
+      const {actionId}=coordination;
+      child.investigation={parentWorkId:parent.id,parentVersion:parent.version+1,parentSessionId:parent.sessionId,parentRunId:original.id,operationId:wait.operationId,actionId,source:pin};
+      this.#confirmWork(child,{kind:'host',source:'readonly-investigation'},true);
+      this.#put('work',child);
+      parent.wait={...reference,investigation:{workId:child.id,actionId,status:'pending'}};
+      this.#saveWork(parent);
+      this.#event('work.created',child,{kind:'host'},{investigation:child.investigation});
+      this.#event('work.resolveWait',parent,actor,{action:'investigate',operationId:wait.operationId,actionId,version:parent.version,investigation:child.investigation,childWorkId:child.id});
+      return parent;
+    });
+  }
+
+  #investigationParent(work) {
+    const ref=work.investigation, parent=this.#get('work',ref.parentWorkId);
+    if(parent===null || parent.workspaceId!==work.workspaceId || parent.status!=='waiting' || parent.version!==ref.parentVersion || parent.sessionId!==ref.parentSessionId ||
+      parent.wait?.kind!=='help' || parent.wait.operationId!==ref.operationId || parent.wait.source.runId!==ref.parentRunId ||
+      parent.wait.investigation?.workId!==work.id || parent.wait.investigation.actionId!==ref.actionId || parent.wait.investigation.status!=='pending' ||
+      this.#get('workspace',work.workspaceId)?.active!==true) return null;
+    return parent;
+  }
+
+  canDispatchInvestigation(work,run) {
+    const parent=this.#investigationParent(work);
+    const authorization=work.authorization, consent=work.modelConsent;
+    if(parent===null || run.workId!==work.id || run.sessionId!==work.sessionId || run.permissionPreset!==null || run.checks.length!==0 ||
+      authorization?.autoAccept!==true || authorization.actor.kind!=='host' || authorization.actor.source!=='readonly-investigation' ||
+      consent?.actor.kind!=='host' || consent.actor.source!=='readonly-investigation' || !approvedModel(parent,parent.model) ||
+      fingerprint(run.model)!==fingerprint(parent.model)) return false;
+    const source=this.#investigationSource(work.workspaceId,work.investigation.source);
+    return source!==null && source.value===run.inputs.manifest;
+  }
+
+  #verifyInvestigation(work,run,reason,reportCallId) {
+    if(reason!=='completed' || reportCallId===undefined || !this.canDispatchInvestigation(work,run)) return null;
+    const candidate=run.reports.find(item=>item.source.callId===reportCallId);
+    if(candidate===undefined || candidate.report.outputs.fact!==run.inputs.manifest) return null;
+    const {turn,step,callId,sessionId,requestId}=candidate.source, observation=run.observation;
+    if(observation?.admitted!==true || observation.completion?.reason!=='completed' || observation.completion.turn!==turn ||
+      sessionId!==run.sessionId || requestId!==run.requestId) return null;
+    const receipt=observation.reportReceipts.find(item=>item.turn===turn && item.step===step && item.callId===callId && item.isError===false && item.seq<observation.completion.endSeq);
+    if(receipt===undefined) return null;
+    return {workId:work.id,runId:run.id,sessionId,requestId,turn,step,callId,eventSeq:receipt.seq,resultVersion:work.version+1,source:work.investigation.source};
+  }
+
+  #returnInvestigation(work,run,verification) {
+    const parent=this.#investigationParent(work);
+    if(parent===null) return;
+    const actor={kind:'host',source:'readonly-investigation'}, operationId=parent.wait.operationId, {actionId}=work.investigation;
+    if(verification!==null) {
+      const {source}=verification, information=run.outputs.fact;
+      const handoff={actor,at:now(),actionId,information,investigation:verification,
+        sources:[`Loom Work ${source.workId}, Run ${source.runId}, result ${source.resultVersion}, output ${source.output}`]};
+      parent.wait={...parent.wait,investigation:{workId:work.id,actionId,status:'verified'},handoff};
+      parent.status='queued';
+    } else {
+      parent.wait={...parent.wait,investigation:{workId:work.id,actionId,status:'failed'},nextCheckAt:now()};
+    }
+    this.#saveWork(parent);
+    this.#event('work.investigationFinished',parent,actor,{operationId,actionId,childWorkId:work.id,runId:run.id,verification});
+  }
+
   settleReport(runId,{callId,eventCursor,coordinate=false}) {
     text(callId,'报告调用ID');requireValue(Number.isSafeInteger(eventCursor) && eventCursor>=-1,'事件游标格式错误');
     return this.#transaction(()=>{

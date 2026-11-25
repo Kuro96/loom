@@ -52,6 +52,7 @@ async function initialize(ctx,config,bindingReady,directory,controlPath) {
       if(request.type!=='work.resolveWait' || request.workId!==scope.workId) throw contextError('FORBIDDEN','自动复查只能处理当前外部操作');
       const work=getWork(scope.workId);
       if(work===null || work.workspaceId!==scope.workspaceId || request.expectedVersion!==scope.expectedVersion || work.version!==scope.expectedVersion) throw contextError('CONFLICT','协调记录已变化');
+      if(request.action==='investigate') return store.startInvestigation(request,actor);
       return store.command(request,actor,{coordinatorSessionId:actor.sessionId,waitEvidence});
     }},
   });

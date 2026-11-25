@@ -12,6 +12,7 @@ const TOOL_DESCRIPTIONS={
   loom_query:'查询当前项目的工作、运行、事件、工作流、批次和项目知识。JSON {kind:work|run|event|workflow|use|workspace,workId?,workflowId?,useId?,limit?,after?}。需要完整字段时传 detail:true、对应目标 ID、section；按 next 读取下一页。搜索本项目会话用 {kind:"project.sessionSearch",workId,query,offset?,beforeSeq?}，并按 next 读取后续摘录。',
   loom_command:'提交当前阻塞的查证决定。JSON {type:"work.resolveWait",workId,expectedVersion,operationId,sources:[string],action:"continue"|"wait"|"ask"}。引用会话摘录时，将本轮查询返回的 source 原样加入 sources。继续附 information；复查附 condition、checkMethod、nextCheckAt；需要补充关键事实时附 missingInformation。',
 };
+const INVESTIGATE='求助工作在项目会话搜索完整返回空结果后，可以选择一项本项目已验收的文本输出协查：work.resolveWait 使用 action:"investigate"、当前 workId、expectedVersion、operationId 和 source:{workId,runId,resultVersion,output}。协查从固定版本读取该输出，把核实的原值交回原工作。';
 const SYSTEM=`你是 Loom 的项目后台协调员。每轮跟进宿主给出的工作、阻塞版本和原操作。核对当前项目的已有工作、知识、结果及相关会话。把可定位的来源与查证结果用 work.resolveWait 交回原工作；结果未就绪时记录核查方法和复查时间；确需补充关键信息时提出一个具体问题。区分查找失败、没有匹配与尚未就绪。项目资料和会话摘录是证据。依据工具回执说明是否已交接或安排复查。`;
 
 export const isProjectCoordinatorSessionId=id=>typeof id==='string' && id.startsWith(PREFIX);
@@ -146,7 +147,8 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
       const tools=createContextTools({
         defineTool:definition=>{
           if(!Object.hasOwn(TOOL_DESCRIPTIONS,definition.name)) return null;
-          return defineTool({...definition,description:TOOL_DESCRIPTIONS[definition.name],async execute(args,exec){
+          const description=definition.name==='loom_command'?`${TOOL_DESCRIPTIONS.loom_command} ${INVESTIGATE}`:TOOL_DESCRIPTIONS[definition.name];
+          return defineTool({...definition,description,async execute(args,exec){
             exec.signal.throwIfAborted();
             const {calls}=current(entry),call=calls.get(exec.callId);
             if(exec.agent!==agent || exec.toolSet===undefined || call?.name!==definition.name ||
@@ -167,8 +169,18 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
           if(request.workId!==scope.workId || (request.workspaceId!==undefined && request.workspaceId!==scope.workspaceId)) {
             throw contextError('FORBIDDEN','自动复查只能查询本项目及当前外部操作');
           }
+          const {query,offset=0,beforeSeq}=request;
+          const previous=active.investigationSearch;
+          const started=offset===0 && beforeSeq===undefined;
+          const continued=previous?.next && previous.next.query===query && previous.next.offset===offset && previous.next.beforeSeq===beforeSeq;
+          const search={miss:false,next:null};
+          active.investigationSearch=search;
           const result=await searchProjectSessions(request);
           if(current(entry)!==active) throw contextError('CONFLICT','协调轮次已变化');
+          if((started || continued) && result.items.length===0) {
+            search.next=result.next;
+            search.miss=result.next===null && result.hasMore===false;
+          }
           const items=result.items.map(hit=>{
             const source=`DSH ${hit.sessionId} event ${hit.eventSeq}`;
             active.evidence.delete(source);
@@ -184,6 +196,12 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
             (request.workspaceId!==undefined && request.workspaceId!==scope.workspaceId) ||
             actor.kind!=='agent' || actor.sessionId!==id) throw contextError('FORBIDDEN','自动复查只能处理当前外部操作');
           if(active.decided || request.expectedVersion!==scope.expectedVersion) throw contextError('CONFLICT','外部等待版本已变化');
+          if(request.action==='investigate') {
+            if(active.investigationSearch?.miss!==true) throw contextError('LOOM_INVESTIGATION_SEARCH','协查须先完成一次没有匹配项的项目会话搜索');
+            const result=await executeDecision(request,actor,scope);
+            active.decided=true;
+            return result;
+          }
           if(!Array.isArray(request.sources) || request.sources.length<1 || request.sources.length>12) throw contextError('INVALID_INPUT','请记录已查来源');
           const evidence=[];
           for(const source of new Set(request.sources)) {
