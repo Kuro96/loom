@@ -19,7 +19,7 @@ function projectLabel(projects, id) {
     ? `${project.title} · ${project.path}` : project.title;
 }
 
-export function ProjectNavigation({ projects, workspaceId, onChange }) {
+export function ProjectNavigation({ projects, workspaceId, onChange, children }) {
   const [expanded, setExpanded] = useState(false), [query, setQuery] = useState('');
   const anchor = useRef(null), search = useRef(null), pickerId = useId();
   const title = workspaceId ? projectName(projects, workspaceId) : '项目';
@@ -45,6 +45,7 @@ export function ProjectNavigation({ projects, workspaceId, onChange }) {
     <button type="button" ref={anchor} className="loom-project-trigger" title={title} aria-label={workspaceId ? `选择项目：${title}` : '选择项目'}
       aria-current={workspaceId ? 'page' : undefined} aria-expanded={expanded} aria-controls={expanded ? pickerId : undefined}
       onClick={() => expanded ? close() : setExpanded(true)}><span>{title}</span><span aria-hidden="true">▾</span></button>
+    {children}
     {expanded && <div className="loom-project-picker" id={pickerId}>
       <input ref={search} aria-label="搜索项目" type="search" placeholder="搜索项目" value={query} onChange={event => setQuery(event.target.value)} />
       <ul className="loom-project-options">{matches.map(project => <li key={project.workspaceId}>

@@ -21,7 +21,7 @@ export function errorText(error) {
 
 export const STATUS_LABELS = {
   needs_release: '待放行', needs_response: '待回应',
-  proposed: '待确认', awaiting_model: '待确认', queued: '排队中', dispatching: '准备执行', running: '执行中', waiting: '等待外部结果',
+  proposed: '待确认', awaiting_model: '待确认', queued: '排队中', dispatching: '准备执行', running: '执行中', waiting: '等待中',
   pause_requested: '暂停中', paused: '已暂停', cancel_requested: '取消中', cancelled: '已取消',
   review: '待验收', accepted: '已验收', failed: '失败', draft: '草稿', active: '进行中', completed: '已完成',
 };

@@ -93,6 +93,141 @@ test('pending proposal opens the batch review and requires explicit confirmation
   assert.equal(store.query({ kind: 'work' }).total, 2);
 });
 
+test('a scheduled work wait shows its owner and next action, with pause and resume on the same work', async t => {
+  const store = database(t), user = { kind: 'user' };
+  const work = createRecord(store, 'work', '核对发布版本', { model: { provider: 'p', model: 'm' } });
+  store.command({ type: 'work.confirm', workId: work.id, expectedVersion: work.version }, user);
+  const run = store.reserveRun(work.id), nextCheckAt = new Date(Date.now() + 3600_000).toISOString();
+  store.reportRun(run.id, { kind: 'wait', summary: '候选包缺少确认清单', wait: {
+    operationId: work.id, remoteRef: 'QH-24', condition: '发布负责人确认清单', checkMethod: '复查发布登记', nextCheckAt,
+  } }, { sessionId: run.sessionId, requestId: run.requestId, turn: 1, callId: 'wait' });
+  store.settleReport(run.id, { callId: 'wait', eventCursor: 2 });
+  const view = await mount(t, { store });
+  const click = name => act(async () => view.button(name).props.onClick());
+  const text = node => typeof node === 'string' ? node : node.children.map(text).join('');
+  const row = view.renderer.root.findByProps({ 'aria-label': '进行中的工作' }).findByProps({ 'data-work-id': work.id });
+  assert.match(text(row), /发布负责人确认清单.*等待中/);
+  await act(async () => row.props.onClick());
+  const report = () => text(view.renderer.root.findByProps({ 'aria-label': '工作报告' }).findByType('dl'));
+  assert.match(JSON.stringify(view.renderer.toJSON()), /等待后台复查/);
+  assert.match(report(), /卡点.*发布负责人确认清单.*负责人.*项目后台总控.*当前动作.*复查发布登记.*下次检查/);
+  assert.equal(view.renderer.root.findByType('time').props.dateTime, nextCheckAt);
+  await click('暂停自动协调');
+  assert.match(JSON.stringify(view.renderer.toJSON()), /已暂停自动协调/);
+  assert.equal(store.getWork(work.id).status, 'paused');
+  assert.equal(view.renderer.root.findAllByType('time').length, 0);
+  await click('恢复自动协调');
+  assert.equal(store.getWork(work.id).status, 'waiting');
+  assert.equal(view.renderer.root.findByType('time').props.dateTime, nextCheckAt);
+});
+
+test('related readonly investigation returns to the original report and discloses its pinned source', async t => {
+  const store = database(t), user = { kind: 'user' }, coordinator = { kind: 'agent', sessionId: 'coordinator' };
+  const make = (title, properties) => {
+    const proposed = createRecord(store, 'work', title, { model: { provider: 'p', model: 'm' }, ...properties });
+    return store.command({ type: 'work.confirm', workId: proposed.id, expectedVersion: proposed.version }, user);
+  };
+  const sourceWork = make('发布登记', { outputs: [{ name: 'manifest', required: true }] }), sourceRun = store.reserveRun(sourceWork.id);
+  const fact = 'QH-24 · 已确认清单 v3';
+  const from = (run, callId) => ({ sessionId: run.sessionId, requestId: run.requestId, turn: 1, step: 0, callId });
+  store.reportRun(sourceRun.id, { kind: 'result', summary: '已核对', outputs: { manifest: fact } }, from(sourceRun, 'ledger'));
+  store.finishRun(sourceRun.id, { reason: 'completed', summary: '已核对发布登记', eventCursor: 5, reportCallId: 'ledger' });
+  const result = store.getWork(sourceWork.id);
+  store.command({ type: 'work.accept', workId: result.id, expectedVersion: result.version, runId: sourceRun.id }, user);
+  const { use } = store.command({ type: 'use.create', workspaceId: 'project', model: { provider: 'p', model: 'm' },
+    definition: { title: '本次发布', stages: [{ id: 'verify', title: '校验候选包' }] } }, user);
+  const executed = store.command({ type: 'use.confirm', useId: use.id, expectedVersion: use.version }, user);
+  const original = executed.works[0], run = store.reserveRun(original.id);
+  store.reportRun(run.id, { kind: 'help', summary: '候选包核对等待清单', help: {
+    missingInformation: '缺少已确认的发布清单', attempted: '已查候选包内的旧清单', expectedEvidence: '发布登记中的确认版本',
+  } }, from(run, 'need-ledger'));
+  store.settleReport(run.id, { callId: 'need-ledger', eventCursor: 5, coordinate: true });
+  const claim = store.claimExternalWait(original.id, store.getWork(original.id).version);
+  const source = { workId: sourceWork.id, runId: sourceRun.id, resultVersion: result.result.version, output: 'manifest' };
+  const parent = store.startInvestigation({ type: 'work.resolveWait', action: 'investigate', workId: original.id, expectedVersion: claim.version,
+    operationId: claim.wait.operationId, source }, coordinator);
+  const child = store.getWork(parent.wait.investigation.workId);
+  const calls = [], nav = { current: { parentId: use.id, stageId: 'verify', stageFromUse: true, view: '报告' } };
+  const lookup = Promise.withResolvers(), sessionsGate = Promise.withResolvers();
+  sessionsGate.resolve([{ sessionId: run.sessionId, workspaceId: original.workspaceId }]);
+  let held = true;
+  const view = await mount(t, { store, previewNavigation: nav, sessionsGate, query: request => held && request.kind === 'work' && request.workId === child.id
+    ? lookup.promise.then(() => store.query(request)) : store.query(request),
+    onRPC: (method, request) => { if (method === 'query' && request.kind === 'run' && request.workId === sourceWork.id) calls.push(request); } });
+  const click = name => act(async () => view.button(name).props.onClick());
+  assert.match(JSON.stringify(view.renderer.toJSON()), /后台正在查证.*缺少已确认的发布清单/);
+  assert.equal(Boolean(view.button('暂停自动协调')), true, 'the original work can pause while its investigation is pending');
+  let pending;
+  await act(async () => { pending = view.button('查看协查工作').props.onClick(); });
+  await click('输入');
+  await act(async () => { held = false; lookup.resolve(); await pending; });
+  assert.equal(view.renderer.root.findByProps({ className: 'loom-detail-header' }).findByType('h2').children.join(''), original.title);
+  assert.equal(view.button('输入').props['aria-pressed'], true);
+  await click('报告');
+  const evidence = () => view.renderer.root.findAllByType('details').find(node => node.findByType('summary').children.join('') === '查看查证记录');
+  await act(async () => evidence().props.onToggle({ currentTarget: { open: true } }));
+  await click('查看协查工作');
+  assert.match(JSON.stringify(view.renderer.toJSON()), /核实已验收的文本输出.*查看原工作/);
+  await click('查看原工作');
+  assert.equal(view.renderer.root.findByProps({ 'aria-label': '工作报告' }).type, 'section');
+  assert.equal(Boolean(view.button('返回本次工作')), true);
+  assert.equal(evidence().props.open, true);
+  await act(async () => evidence().props.onToggle({ currentTarget: { open: false } }));
+  const check = store.reserveRun(child.id);
+  store.reportRun(check.id, { kind: 'result', summary: '已核实 v3', outputs: { fact } }, from(check, 'verified'));
+  store.updateRun(check.id, { observation: { admitted: true, completion: { reason: 'completed', turn: 1, endSeq: 5 },
+    reportReceipts: [{ turn: 1, step: 0, callId: 'verified', isError: false, seq: 4 }] } });
+  store.finishRun(check.id, { reason: 'completed', summary: '已核实 v3', eventCursor: 5, reportCallId: 'verified' });
+  assert.equal(store.getWork(original.id).status, 'queued');
+  await click('刷新');
+  assert.match(JSON.stringify(view.renderer.toJSON()), /已核实线索，等待原工作继续/);
+  assert.doesNotMatch(JSON.stringify(view.renderer.toJSON()), /已交回原工作/);
+  assert.equal(calls.length, 0);
+  const continuation = store.reserveRun(original.id);
+  store.updateRun(continuation.id, { running: true, observation: { admitted: true } });
+  await click('刷新');
+  assert.match(JSON.stringify(view.renderer.toJSON()), /已交回原工作.*原工作正在执行/);
+  const disclosure = view.renderer.root.findAllByType('details').find(node => node.findByType('summary').children.join('') === '查看查证记录');
+  await act(async () => disclosure.props.onToggle({ currentTarget: { open: true } }));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].workspaceId, original.workspaceId);
+  assert.match(JSON.stringify(view.renderer.toJSON()), /已核实的来源.*QH-24 · 已确认清单 v3/);
+  await click('查看对话');
+  assert.deepEqual(view.opened, [run.sessionId]);
+  assert.equal(nav.current.view, '报告');
+  assert.equal(nav.current.workId, original.id);
+  assert.equal(nav.current.evidenceOpen, true);
+  const returned = await mount(t, { store, previewNavigation: nav });
+  assert.match(JSON.stringify(returned.renderer.toJSON()), /已核实的来源.*QH-24 · 已确认清单 v3/);
+});
+
+test('the saved external and session sources disclose their recorded values and destinations', async t => {
+  const store = database(t), user = { kind: 'user' }, coordinator = { kind: 'agent', sessionId: 'coordinator' };
+  const item = createRecord(store, 'work', '核对已发布版本', { model: { provider: 'p', model: 'm' } });
+  const work = store.command({ type:'work.confirm', workId:item.id, expectedVersion:item.version }, user);
+  const run = store.reserveRun(work.id);
+  store.reportRun(run.id, { kind: 'help', summary: '需要核实发布版本', help: {
+    missingInformation: '缺少发布版本', attempted: '已查候选包', expectedEvidence: '分支提交',
+  } }, { sessionId:run.sessionId, requestId:run.requestId, turn:1, callId:'help' });
+  store.settleReport(run.id, { callId:'help', eventCursor:2, coordinate:true });
+  const claimed = store.claimExternalWait(work.id, store.getWork(work.id).version);
+  const sha = 'a'.repeat(40), url = 'https://github.com/Kuro96/loom/tree/main';
+  const evidence = [{ kind: 'github-ref', repository: 'Kuro96/loom', ref: 'refs/heads/main', sha, url, observedAt: new Date().toISOString() },
+    { sessionId: run.sessionId, eventSeq: 4, snippet: '候选包已经提交发布申请。' }];
+  store.command({ type:'work.resolveWait', workId:work.id, expectedVersion:claimed.version, operationId:claimed.wait.operationId,
+    action:'continue', information:'发布分支已查证', sources:['GitHub Kuro96/loom refs/heads/main', `DSH ${run.sessionId} event 4`, '发布说明'] },
+    coordinator, { coordinatorSessionId: coordinator.sessionId, waitEvidence: evidence });
+  const view = await mount(t, { store });
+  await act(async () => view.renderer.root.findByProps({ 'data-work-id': work.id }).props.onClick());
+  assert.equal(view.renderer.root.findAllByType('a').length, 0);
+  assert.doesNotMatch(JSON.stringify(view.renderer.toJSON()), /候选包已经提交发布申请/);
+  const disclosure = view.renderer.root.findAllByType('details').find(node => node.findByType('summary').children.join('') === '查看查证记录');
+  await act(async () => disclosure.props.onToggle({ currentTarget: { open: true } }));
+  assert.equal(view.renderer.root.findByType('a').props.href, url);
+  assert.match(JSON.stringify(view.renderer.toJSON()), new RegExp(`${sha}.*候选包已经提交发布申请`));
+  assert.doesNotMatch(JSON.stringify(view.renderer.toJSON()), /refs\/heads|DSH session-/);
+});
+
 test('the pending work row opens the specific external question and resumes the same work', async t => {
   const store = database(t), user = { kind: 'user' };
   const item = createRecord(store, 'work', '核对回执', { model: { provider:'p', model:'m' } });
@@ -101,18 +236,31 @@ test('the pending work row opens the specific external question and resumes the 
   store.reportRun(run.id, { kind:'uncertain', summary:'缺新地址', uncertainty:{ operationId:work.id, remoteRef:'receipt:17', reason:'旧目录停用', attempted:'已查项目手册', missingInformation } },
     { sessionId:run.sessionId, requestId:run.requestId, turn:1, callId:'external-question' });
   store.settleReport(run.id, { callId:'external-question', eventCursor:2 });
-  const view = await mount(t, { store });
+  const commands = [], view = await mount(t, { store, command: command => {
+    commands.push(command);
+    return store.command(command, user);
+  }, previewNavigation: { current: { workspaceId: 'project', statusFilter: ['interaction'], workflowFilter: '__unclassified' } } });
   const row = view.renderer.root.findByProps({ 'data-work-id': item.id });
   assert.match(row.props['aria-label'], /查看待补信息.*新版回执目录/);
+  assert.equal(row.findAllByType('span').map(span => span.children.join('')).includes('查看待补信息'), true);
   await act(async () => row.props.onClick());
-  assert.match(JSON.stringify(view.renderer.toJSON()), /已查项目手册/);
+  assert.match(JSON.stringify(view.renderer.toJSON()), /请提供新版回执目录/);
   await act(async () => view.button('补充信息').props.onClick());
-  assert.equal(view.button('提交并继续').props.disabled, true);
+  const submit = () => view.button('提交并继续');
+  assert.equal(submit().props.disabled, true);
+  assert.equal(submit().props.type, 'submit');
   await act(async () => view.renderer.root.findByProps({ 'aria-label':'补充信息' }).props.onChange({ target:{ value:'replies/new/' } }));
-  await act(async () => view.button('提交并继续').props.onClick());
+  assert.equal(commands.length, 0);
+  const before = store.getWork(item.id);
+  await act(async () => view.renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }));
+  assert.deepEqual(commands, [{ type: 'work.resume', workId: item.id, expectedVersion: before.version, information: 'replies/new/' }]);
+  assert.match(JSON.stringify(view.renderer.toJSON()), /已提交补充信息/);
   assert.equal(store.getWork(item.id).status,'queued');
   assert.equal(store.getWork(item.id).wait.information,'replies/new/');
   assert.equal(store.query({ kind:'work', categories:['interaction'] }).total,0);
+  await act(async () => view.button('返回待处理').props.onClick());
+  assert.equal(view.renderer.root.findByProps({ 'aria-label': '筛选工作流' }).props.value, '__unclassified');
+  assert.equal(view.renderer.root.findAllByProps({ 'data-work-id': item.id }).length, 0);
 });
 
 test('a pending standalone work can replace an unavailable execution model before approval', async t => {
@@ -228,6 +376,47 @@ test('native approval opens evidence first and retains the filtered origin when 
   assert.equal(nav.current.workId, item.id);
   assert.deepEqual([nav.current.tab, nav.current.workspaceId, nav.current.statusFilter, nav.current.workflowFilter, nav.current.positions.work], ['work', 'project', ['interaction'], '__unclassified', 64]);
   assert.equal(store.getRun(run.id).status, 'dispatching');
+});
+
+test('a continued native question still points to the worker conversation', async t => {
+  const store = database(t), user = { kind: 'user' }, commands = [];
+  const item = createRecord(store, 'work', '核对合同', { sessionId: 'worker', model: { provider: 'p', model: 'm' } });
+  store.command({ type: 'work.confirm', workId: item.id, expectedVersion: item.version }, user);
+  const run = store.reserveRun(item.id);
+  const call = { sessionId: run.sessionId, requestId: run.requestId, turn: 1, step: 0, callId: 'ask', callSeq: 2 };
+  store.updateRun(run.id, { status: 'running', pendingInput: [], observation: {
+    admitted: true, questionCalls: [call], questionReceipts: [{ ...call, asOfSeq: 5, status: 'continued' }],
+  } });
+  const view = await mount(t, { store, previewNavigation: { current: { workspaceId: 'project', statusFilter: ['interaction'] } },
+    command: request => { commands.push(request); return store.command(request, user); } });
+  await act(async () => view.button('查看待补输入').props.onClick());
+  assert.match(JSON.stringify(view.renderer.toJSON()), /原生提问仍待回答/);
+  await act(async () => view.button('查看对话').props.onClick());
+  assert.deepEqual(view.opened, ['worker']);
+  assert.deepEqual(commands, []);
+  store.updateRun(run.id, { observation: { admitted: true, questionCalls: [call], questionReceipts: [{ ...call, asOfSeq: 8, status: 'settled', resultSeq: 3 }] } });
+  await act(async () => view.button('刷新').props.onClick());
+  assert.doesNotMatch(JSON.stringify(view.renderer.toJSON()), /原生提问仍待回答/);
+  await act(async () => view.button('返回待处理').props.onClick());
+  assert.equal(Boolean(view.button('查看待补输入')), false);
+});
+
+test('a live native diagnostic discloses the actual retry time and clears after recovery', async t => {
+  const store = database(t), user = { kind: 'user' };
+  const item = createRecord(store, 'work', '附件核对', { model: { provider: 'p', model: 'm' } });
+  store.command({ type: 'work.confirm', workId: item.id, expectedVersion: item.version }, user);
+  const run = store.reserveRun(item.id), retryAt = Date.now() + 4000;
+  store.updateRun(run.id, { diagnostic: '投递尚待核对：连接超时', nativeFault: { scope: 'run', code: 'TIMEOUT', operation: '核对原投递', attempts: 2, retryAt } });
+  const view = await mount(t, { store });
+  assert.equal(view.renderer.root.findAllByProps({ 'aria-label': '待处理的工作' }).length, 0);
+  const row = view.renderer.root.findByProps({ 'aria-label': '进行中的工作' }).findByProps({ 'data-work-id': item.id });
+  await act(async () => row.props.onClick());
+  await act(async () => view.button('报告').props.onClick());
+  assert.match(JSON.stringify(view.renderer.toJSON()), /执行状态待核对.*下次检查.*技术详情.*连接超时/);
+  assert.equal(view.renderer.root.findByType('time').props.dateTime, new Date(retryAt).toISOString());
+  store.updateRun(run.id, { diagnostic: null, nativeFault: null });
+  await act(async () => view.button('刷新').props.onClick());
+  assert.doesNotMatch(JSON.stringify(view.renderer.toJSON()), /执行状态待核对|连接超时/);
 });
 
 test('a delayed native session lookup preserves a newer project selection', async t => {
@@ -710,6 +899,62 @@ function database(t) {
   t.after(() => store.close());
   return store;
 }
+
+test('project navigation reads back the pause setting for the selected project', async t => {
+  const store = database(t), requests = [];
+  store.syncWorkspaces([{ workspaceId: 'project', title: '项目', path: 'D:/project' }, { workspaceId: 'other', title: '其他项目', path: 'D:/other' }]);
+  const workspace = id => store.query({ kind: 'workspace', workspaceId: id, limit: 1 }).items[0];
+  const view = await mount(t, { store, onRPC: (method, payload) => { if (method === 'command') requests.push(payload); } });
+  const click = name => act(async () => {
+    const control = view.button(name);
+    assert.equal(Boolean(control), true, name);
+    assert.equal(Boolean(control.props.disabled), false, name);
+    await control.props.onClick();
+  });
+  assert.equal(Boolean(view.button('暂停项目协调')), false, 'choose a project first');
+  const before = workspace('project').version;
+  const waiting = createRecord(store, 'work', '核对正式清单', { model: { provider: 'p', model: 'm' } });
+  store.command({ type: 'work.confirm', workId: waiting.id, expectedVersion: waiting.version }, { kind: 'user' });
+  const run = store.reserveRun(waiting.id), nextCheckAt = new Date(Date.now() + 3600_000).toISOString();
+  store.reportRun(run.id, { kind: 'wait', summary: '等待签收', wait: { operationId: waiting.id, remoteRef: 'QH-30', condition: '收到签收记录', nextCheckAt } },
+    { sessionId: run.sessionId, requestId: run.requestId, turn: 1, callId: 'pause-preview' });
+  store.settleReport(run.id, { callId: 'pause-preview', eventCursor: 2, coordinate: true });
+  await click('选择项目'); await click('项目');
+  assert.deepEqual(requests, [], 'choosing a project only reads it');
+  await act(async () => view.renderer.root.findByProps({ 'data-work-id': waiting.id }).props.onClick());
+  assert.equal(view.renderer.root.findByType('time').props.dateTime, nextCheckAt);
+  await click('暂停项目协调');
+  assert.deepEqual(requests, [{ type: 'workspace.setCoordinationPaused', workspaceId: 'project', paused: true, expectedVersion: before }]);
+  assert.equal(workspace('project').coordinationPaused, true);
+  assert.notEqual(workspace('other').coordinationPaused, true);
+  assert.equal(store.getWork(waiting.id).status, 'waiting');
+  const report = view.renderer.root.findByProps({ 'aria-label': '工作协调' });
+  assert.equal(report.findAllByType('p').some(item => item.children.join('') === '项目协调已暂停'), true);
+  assert.equal(view.renderer.root.findAllByType('time').length, 0);
+  const pausedVersion = workspace('project').version;
+  await click('恢复项目协调');
+  assert.deepEqual(requests[1], { type: 'workspace.setCoordinationPaused', workspaceId: 'project', paused: false, expectedVersion: pausedVersion });
+  assert.equal(workspace('project').coordinationPaused, false);
+  assert.equal(Boolean(view.button('暂停项目协调')), true);
+});
+
+test('project pause reads back after switching to workflows in the same project', async t => {
+  const store = database(t), gate = Promise.withResolvers(), requests = [];
+  const view = await mount(t, { store, previewNavigation: { current: { workspaceId: 'project' } },
+    commandGate: (request, result) => { requests.push(request); return request.paused ? gate.promise.then(() => result) : result; } });
+  let pending;
+  await act(async () => { pending = view.button('暂停项目协调').props.onClick(); });
+  await act(async () => view.button('工作流').props.onClick());
+  const whilePending = view.button('暂停项目协调').props.disabled;
+  await act(async () => { gate.resolve(); await pending; });
+  const resume = view.button('恢复项目协调');
+  assert.equal(Boolean(resume), true, 'read back the saved project when the panel changes');
+  assert.equal(whilePending, true);
+  assert.equal(resume.props.disabled, false);
+  assert.equal(view.renderer.root.findAllByProps({ 'aria-label': '关闭操作提示' }).length, 0);
+  await act(async () => resume.props.onClick());
+  assert.deepEqual(requests.map(({ paused, expectedVersion }) => [paused, expectedVersion]), [[true, 1], [false, 2]]);
+});
 
 const createRecord = (store, kind, title, extra = {}) => store.command({ type: `${kind}.create`, workspaceId: 'project', title, ...(kind === 'workflow' ? { stages: [{ id: 'step', title: '交付' }] } : {}), ...extra }, { kind: 'user' });
 

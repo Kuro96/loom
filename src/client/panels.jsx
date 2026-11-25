@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { applyDefaultModel, blockingReasons, createCommandMemo, saveSettings } from './state.mjs';
 import { Badge, ErrorNotice, Field, InlinePage, Json, ModelPicker } from './components.jsx';
 import { UsagePanel } from './usage-panel.jsx';
-import { GateEvidence, pendingInteraction, retryEvidenceIssue, SummaryText, WorkInputs, WorkOutputs, WorkReport } from './work-result.jsx';
+import { GateEvidence, pendingInteraction, retryEvidenceIssue, WorkInputs, WorkOutputs, WorkReport } from './work-result.jsx';
 
 import { batchActionLabel, reviewLabel } from './reader-fields.mjs';
 
@@ -36,7 +36,7 @@ function useCurrentRun(api, work) {
   const { id } = work, resultId = work.result?.runId;
   const status = resultId ? null : work.status, version = resultId ? null : work.version;
   const live = liveStates.includes(status);
-  const needed = live || Boolean(work.wait && !resultId) || Boolean(resultId && (work.result.review?.source === 'acceptance-error' || Object.values(work.inputs).some(ref => ref.kind === 'result')));
+  const needed = live || Boolean(work.wait) || Boolean(resultId && (work.result.review?.source === 'acceptance-error' || Object.values(work.inputs).some(ref => ref.kind === 'result')));
   const read = useCallback(async active => {
     // A result pins an immutable run. Otherwise read the last matching run,
     // following the store's oldest-first cursor chain rather than list order in the UI.
@@ -104,6 +104,7 @@ function FeedbackForm({ work, api, busy, onAction, onClose, mode }) {
   const [error, setError] = useState(null), [sending, setSending] = useState(false);
   const blocked = impact?.works.some(item => liveStates.includes(item.status));
   async function submit() {
+    if (busy || sending || blocked || !feedback.trim()) return;
     setSending(true); setError(null);
     try {
       let command;
@@ -123,17 +124,17 @@ function FeedbackForm({ work, api, busy, onAction, onClose, mode }) {
     finally { setSending(false); }
   }
   const label = external ? '补充外部信息' : steer ? '补充执行要求' : '返工反馈';
-  return <section aria-label={label}>
-    {external && <SummaryText>{work.wait.missingInformation}</SummaryText>}
+  const Container = external ? 'form' : 'section';
+  return <Container aria-label={label} onSubmit={external ? event => { event.preventDefault(); return submit(); } : undefined}>
     <Field label={external ? '补充信息' : steer ? '补充要求' : '需要调整的内容'}><textarea autoFocus aria-label={external ? '补充信息' : '反馈'} rows={3} disabled={sending || Boolean(impact)} value={feedback} onChange={event => setFeedback(event.target.value)} /></Field>
     {impact && <section aria-label="受影响的工作"><h3>受影响的工作</h3><p className="loom-hint">勾选要重跑的工作，其余保留原结果。</p>
       {impact.works.map(item => <label className="loom-checkbox" key={item.id}><input type="checkbox" disabled={sending} aria-label={`重跑工作 ${item.title}`} checked={rerun.includes(item.id)} onChange={event => setRerun(event.target.checked ? [...rerun, item.id] : rerun.filter(id => id !== item.id))} /><span>{item.title} · <Badge status={item.status} /></span></label>)}
       {blocked && <p className="loom-warning">请先停止受影响的活动工作，再重新核对影响。</p>}
     </section>}
     <ErrorNotice error={error} />
-    <div className="loom-actions"><button type="button" disabled={busy || sending || blocked || !feedback.trim()} onClick={submit}>{external ? '提交并继续' : steer ? '发送干预' : impact ? '确认返工' : '提交返工'}</button>
-      <button type="button" disabled={sending} onClick={onClose}>返回</button></div>
-  </section>;
+    <div className="loom-actions"><button type={external ? 'submit' : 'button'} className={external ? 'loom-primary' : undefined} disabled={busy || sending || blocked || !feedback.trim()} onClick={external ? undefined : submit}>{external ? '提交并继续' : steer ? '发送干预' : impact ? '确认返工' : '提交返工'}</button>
+      <button type="button" disabled={sending} onClick={onClose}>{external ? '收起表单' : '返回'}</button></div>
+  </Container>;
 }
 
 function ModelChoice({ work, catalog, busy, onAction }) {
@@ -141,15 +142,18 @@ function ModelChoice({ work, catalog, busy, onAction }) {
   return <section><ModelPicker catalog={catalog} value={model} onChange={setModel} disabled={busy} /><button type="button" disabled={busy || !model || JSON.stringify(model) === JSON.stringify(work.model)} onClick={() => onAction({ type: 'work.setModel', workId: work.id, expectedVersion: work.version, model })}>保存模型提案</button></section>;
 }
 
-export function WorkDetail({ work, works, workspaces = [], workflows = [], source = null, onSave, catalog, busy, onAction, onConsent, onAccept, onCancel, onDelete, onOpenSession, onOpenFile, onOpenReport, initialView, onViewChange, api }) {
+export function WorkDetail({ work, works, workspaces = [], workflows = [], source = null, onSave, catalog, busy, onAction, onConsent, onAccept, onCancel, onDelete, onOpenSession, onOpenFile, onOpenReport, initialView, onViewChange, onRelatedWork, initialEvidenceOpen, rememberEvidence, api }) {
   const { status } = work;
   const [selectedView, setView] = useState(initialView ?? null), [form, setForm] = useState(null);
   const [commandFor] = useState(createCommandMemo);
-  const view = selectedView ?? (status === 'accepted' && work.result?.deliverables?.length ? '输出' : work.result || work.wait || status === 'cancelled' ? '报告' : '输入');
-  useEffect(() => { onViewChange?.(view); }, [onViewChange, view]);
+  const current = useCurrentRun(api, work);
+  const view = selectedView ?? (status === 'accepted' && work.result?.deliverables?.length ? '输出' : work.result || work.wait || work.investigation || current.value?.nativeFault?.scope === 'run' || status === 'cancelled' ? '报告' : '输入');
+  const [evidenceOpen, setEvidenceOpen] = useState(Boolean(initialEvidenceOpen));
+  function trackEvidence(open) { setEvidenceOpen(open); rememberEvidence?.(open); }
+  useLayoutEffect(() => { onViewChange?.(view); }, [onViewChange, view]);
   const beforeRun = ['awaiting_model', 'queued', 'paused'].includes(status);
   const pendingConsent = beforeRun && (work.modelConsent?.modelRevision !== work.modelRevision || work.checks.some(check => check.kind === 'command') && work.checksConsent?.checksRevision !== work.checksRevision);
-  const canSteer = ['dispatching', 'running'].includes(status);
+  const canSteer = ['dispatching', 'running'].includes(status) && !work.investigation;
   const needsExternalInput = Boolean(work.wait?.missingInformation);
   const canRework = !needsExternalInput && (['review', 'failed'].includes(status) || work.inputChanges.length > 0 && ['accepted', 'paused', 'cancelled'].includes(status));
   const missingOutput = status === 'review' && work.outputs.some(item => item.required && !Object.hasOwn(work.result.outputs ?? {}, item.name));
@@ -158,11 +162,19 @@ export function WorkDetail({ work, works, workspaces = [], workflows = [], sourc
   const needsInformation = status === 'paused' && !pendingConsent && needsExternalInput;
   const feedbackOpen = activeForm === 'steer' && canSteer || activeForm === 'rework' && canRework || activeForm === 'external' && needsInformation;
   const command = type => onAction({ type, workId: work.id, expectedVersion: work.version });
+  const coordinating = Boolean(work.wait?.nextCheckAt) || work.wait?.investigation?.status === 'pending';
+  const resumeCoordination = status === 'paused' && !pendingConsent && !needsInformation && coordinating;
+  const pauseControls = (status === 'waiting' && coordinating || resumeCoordination) && <div className="loom-actions"><button type="button" disabled={busy}
+    onClick={() => command(resumeCoordination ? 'work.resume' : 'work.pause')}>{resumeCoordination ? '恢复自动协调' : '暂停自动协调'}</button></div>;
+  const questionControls = needsInformation && (activeForm === 'external'
+    ? <FeedbackForm key={form.version} work={work} api={api} busy={busy} onAction={onAction} onClose={() => setForm(null)} mode="external" />
+    : <div className="loom-actions"><button className="loom-primary" type="button" disabled={busy} onClick={() => openForm('external')}>补充信息</button></div>);
   const blockers = beforeRun ? blockingReasons(work, works) : [];
   const workflow = work.useId ? source?.definitionSnapshot : workflows.find(item => item.id === work.workflowId);
   const stage = workflow?.stages.find(item => item.id === work.stageId);
-  const context = [workspaces.find(item => item.workspaceId === work.workspaceId)?.title, workflow?.title, source && new Date(source.createdAt).toLocaleString()].filter(Boolean).join(' · ');
-  const current = useCurrentRun(api, work);
+  const project = workspaces.find(item => item.workspaceId === work.workspaceId);
+  const projectPaused = project?.coordinationPaused === true;
+  const context = [project?.title, workflow?.title, source && new Date(source.createdAt).toLocaleString()].filter(Boolean).join(' · ');
   const interaction = canSteer && pendingInteraction(current.value);
   const gatePending = status === 'queued' && work.gate?.required && !work.gate.released;
   const retryPending = status === 'review' && work.result.review?.source === 'acceptance-error';
@@ -175,16 +187,17 @@ export function WorkDetail({ work, works, workspaces = [], workflows = [], sourc
     {status === 'review' && !missingOutput && <button className="loom-primary" type="button" disabled={busy} onClick={() => onAccept(work)}>验收结果</button>}
     {canRework && !feedbackOpen && <button type="button" disabled={busy} onClick={() => openForm('rework')}>发起返工</button>}
     {canSteer && !feedbackOpen && <button type="button" disabled={busy} onClick={() => openForm('steer')}>补充执行要求</button>}
-    {work.sessionId && <button type="button" className={interaction ? 'loom-primary' : undefined} onClick={() => onOpenSession(work.sessionId, view)}>查看对话</button>}
-    {['queued', 'dispatching', 'running', 'waiting'].includes(status) && <button type="button" disabled={busy} onClick={() => command('work.pause')}>暂停工作</button>}
-    {needsInformation && !feedbackOpen && <button className="loom-primary" type="button" disabled={busy} onClick={() => openForm('external')}>补充信息</button>}
-    {status === 'paused' && !pendingConsent && !needsInformation && <button type="button" disabled={busy} onClick={() => command('work.resume')}>继续工作</button>}
+    {work.sessionId && !work.investigation && <button type="button" className={interaction ? 'loom-primary' : undefined} onClick={() => onOpenSession(work.sessionId, view)}>查看对话</button>}
+    {!work.investigation && ['queued', 'dispatching', 'running'].includes(status) && <button type="button" disabled={busy} onClick={() => command('work.pause')}>暂停工作</button>}
+    {view !== '报告' && pauseControls && <button type="button" onClick={() => setView('报告')}>查看协调进度</button>}
+    {view !== '报告' && needsInformation && <button type="button" className="loom-primary" onClick={() => setView('报告')}>查看待补信息</button>}
+    {status === 'paused' && !pendingConsent && !needsInformation && !resumeCoordination && <button type="button" disabled={busy} onClick={() => command('work.resume')}>继续工作</button>}
     {onCancel && !['accepted', 'cancelled', 'cancel_requested'].includes(status) && <button type="button" disabled={busy} onClick={() => onCancel(work)}>取消工作</button>}
     {status === 'accepted' && onSave && <button type="button" disabled={busy} onClick={() => onSave(work)}>保存为工作流</button>}
     {onDelete && !liveStates.includes(status) && <button type="button" className="loom-danger-text" disabled={busy} onClick={() => onDelete(work)}>删除工作</button>}
   </>}>
     {pendingConsent && (!work.model || activeForm === 'model') && <ModelChoice key={work.modelRevision} work={work} catalog={catalog} busy={busy} onAction={onAction} />}
-    {feedbackOpen && <FeedbackForm key={activeForm} work={work} api={api} busy={busy} onAction={onAction} onClose={() => setForm(null)} mode={activeForm} />}
+    {feedbackOpen && activeForm !== 'external' && <FeedbackForm key={activeForm} work={work} api={api} busy={busy} onAction={onAction} onClose={() => setForm(null)} mode={activeForm} />}
     {gatePending && <GateEvidence work={work} works={works} busy={busy} onRelease={() => command('work.releaseGate')} onOpenFile={onOpenFile} onOpenReport={onOpenReport} />}
     {!gatePending && blockers.length > 0 && <ul className="loom-blockers">{blockers.map((reason, index) => <li key={index}>{reason}</li>)}</ul>}
     {missingOutput && <p className="loom-warning">缺少验收所需的结果，请发起返工。</p>}
@@ -192,12 +205,11 @@ export function WorkDetail({ work, works, workspaces = [], workflows = [], sourc
     {retryPending && !missingOutput && current.loading && <p className="loom-hint">正在读取本次预验收证据…</p>}
     {['pause_requested', 'cancel_requested'].includes(status) && <StopStatus work={work} api={api} />}
     {interaction && <p className="loom-warning" role="status">{interaction}</p>}
-    {work.wait && !work.result && view !== '报告' && <p className="loom-warning">{status === 'cancelled' ? '本地跟踪已结束，远端状态待核实' : work.wait.reason || work.wait.condition} · <button type="button" onClick={() => setView('报告')}>查看远端操作</button></p>}
     {work.inputChanges.length > 0 && <p className="loom-warning">上游结果已变更 · {work.inputChanges.map(change => `${works.find(item => item.id === change.workId)?.title ?? '来源工作'}（原结果版本 ${change.resultVersion}）`).join('、')}</p>}
     <ErrorNotice error={current.error} onRetry={current.retry} />
     {view === '输入' ? <WorkInputs {...work} works={works} current={current} stage={stage} definition={workflow} />
       : view === '输出' ? <WorkOutputs status={status} result={work.result} retry={retry} onOpen={onOpenFile && (file => onOpenFile(work, file))} />
-      : <WorkReport {...work} run={current.value} retry={retry} onOpen={onOpenReport && (doc => onOpenReport(work, doc))} />}
+      : <WorkReport {...work} {...{ api, retry, pauseControls, projectPaused, questionControls, onRelatedWork, evidenceOpen }} run={current.value} onEvidenceChange={trackEvidence} onOpen={onOpenReport && (doc => onOpenReport(work, doc))} />}
   </DetailShell>;
 }
 

@@ -39,6 +39,10 @@ async function readCatalog(api, first, workspaceId) {
   return items;
 }
 
+function selectedWorkFrom(origin) {
+  return origin?.stageId && origin.parentId ? null : origin?.workId ?? null;
+}
+
 export function LoomPanel(props) {
   const { api, retain, openMain, WorkspaceReader, readFile, previewNavigation, SessionProvider, renderSlot } = props;
   const [resume]=useState(()=>previewNavigation?.current);
@@ -49,7 +53,7 @@ export function LoomPanel(props) {
   const [managing, setManaging] = useState(false), [checked, setChecked] = useState(() => new Set());
   const positions = useRef({ work: 0, workflow: 0, ...resume?.positions });
 
-  const [tab, setTab] = useState(resume?.tab ?? 'work'), [selectedId, setSelectedId] = useState(resume?.workId ?? null), [selectedFlowId, setSelectedFlowId] = useState(resume?.flowId ?? null);
+  const [tab, setTab] = useState(resume?.tab ?? 'work'), [selectedId, setSelectedId] = useState(() => selectedWorkFrom(resume)), [selectedFlowId, setSelectedFlowId] = useState(resume?.flowId ?? null);
   const [attentionWorkId,setAttentionWorkId] = useState(resume?.attentionWorkId ?? null);
   const [focusedWork, setFocusedWork] = useState(null), [focusedFlow, setFocusedFlow] = useState(null);
   const [selectedUseId, setSelectedUseId] = useState(resume?.parentId ?? null), [focusedUse, setFocusedUse] = useState(null), [workSource, setWorkSource] = useState(null);
@@ -59,13 +63,18 @@ export function LoomPanel(props) {
   const [trail,setTrail]=useState(resume?.trail ?? []), [restoredView,setRestoredView]=useState(null);
   const [dependencies, setDependencies] = useState({ workId: null, items: [] });
 
-  const detailView=useRef(resume?.view), rememberView=useCallback(view=>{ detailView.current=view; },[]);
+  const detailView = useRef({ name: resume?.view });
+  const rememberView = useCallback(name => {
+    if (detailView.current.name !== name) detailView.current = { name };
+  }, []);
+  const detailScroll = useRef(null), evidenceOpen = useRef(false);
   const refreshSerial = useRef(0), currentRefresh = useRef(null), mounted = useRef(true);
   const [catalog, setCatalog] = useState(null), [catalogError, setCatalogError] = useState(null);
 
   const [liveError, setConnectionError] = useState(null), [directoryError, setDirectoryError] = useState(null), [actionError, setActionError] = useState(null), [notice, setNotice] = useState('');
   const connectionError = liveError ?? (directoryError?.workspaceId === workspaceId ? directoryError.reason : null);
   const [busy, setBusy] = useState(false), [loading, setLoading] = useState(true), [syncedAt, setSyncedAt] = useState(null);
+  const [coordinationSaving, setCoordinationSaving] = useState(false);
   const [surface, setSurface] = useState(null), [railPreference, setRailPreference] = useState(resume?.railOpen ?? (resume ? true : null)), [mobilePane, setMobilePane] = useState(resume?.mobilePane ?? (resume ? 'work' : 'chat'));
   const showingPage = Boolean(surface && !confirmations.has(surface.kind));
   const viewScope = useMemo(() => ({ workspaceId, tab, selectedId, selectedFlowId, selectedUseId, selectedStageId, statusFilter, workflowFilter, workDepth, mobilePane, managing }),
@@ -94,8 +103,9 @@ export function LoomPanel(props) {
     const target = origin instanceof HTMLElement && origin.getClientRects().length && !origin.matches(':disabled') ? origin : settingsButton.current;
     target.focus({ preventScroll: true });
   }, [showingPage]);
-  function origin(view=detailView.current) {
-    return {tab,workId:selectedId,view,workspaceId,statusFilter,workflowFilter,workDepth,positions:{...positions.current},parentId:selectedUseId,stageId:selectedStageId,stageFromUse,flowId:selectedFlowId,useOriginFlow,railOpen,mobilePane,attentionWorkId};
+  function origin(view=detailView.current.name) {
+    return {tab,workId:focusedWork?.id ?? selectedId,view,workspaceId,statusFilter,workflowFilter,workDepth,positions:{...positions.current},parentId:selectedUseId,stageId:selectedStageId,stageFromUse,flowId:selectedFlowId,useOriginFlow,railOpen,mobilePane,attentionWorkId,
+      evidenceOpen:evidenceOpen.current, detailScrollTop:detailScroll.current?.scrollTop};
   }
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; refreshSerial.current++; }; }, []);
@@ -107,10 +117,14 @@ export function LoomPanel(props) {
   useEffect(() => { void reloadModels(); }, [reloadModels]);
 
   const directoryTask = useRef(null);
-  const readDirectory = useCallback(function load() {
+  const readDirectory = useCallback(async function load(afterCommand = false) {
     const scope = directoryTask.current;
     if (scope?.load !== load) return;
-    if (scope.pending) return scope.pending;
+    if (scope.pending) {
+      if (!afterCommand) return scope.pending;
+      await scope.pending;
+      if (directoryTask.current !== scope) return;
+    }
     const current = () => directoryTask.current === scope;
     scope.pending = (async () => {
       try {
@@ -119,6 +133,7 @@ export function LoomPanel(props) {
         const workflows = await readCatalog(api, first.workflows, workspaceId);
         if (!current()) return;
         setSnapshot({ ...first, workflows, workspaceId }); setDirectoryError(null);
+        return first.workspaces;
       } catch (reason) { if (current()) setDirectoryError({ workspaceId, reason }); }
       finally { scope.pending = null; }
     })();
@@ -216,11 +231,11 @@ export function LoomPanel(props) {
     if (ownsReceipt()) await Promise.all([refresh(), /^(workflow|settings|workspace)\./.test(command.type) && readDirectory()]);
     return result;
   }
-  async function run(task, label = '已完成。') {
+  async function run(task, label = '已完成。', isSourceCurrent = () => true) {
     if (action.current !== null) return false;
     const token = action.current = {};
     const current = () => viewIsCurrent() && action.current === token;
-    const showReceipt = () => current() && currentSurface.current === surface;
+    const showReceipt = () => current() && currentSurface.current === surface && isSourceCurrent();
     setBusy(true); setActionError(null); setNotice('');
     try { if (await task() === false || !showReceipt()) return false; setNotice(label); return true; }
     catch (reason) { if (showReceipt()) setActionError(reason); return false; }
@@ -236,8 +251,20 @@ export function LoomPanel(props) {
   }
   function returnFromReference(){
     const from=relatedParent.from;refreshSerial.current++;setTrail(prev=>prev.slice(0,-1));setRestoredView(from);
-    setFocusedWork(null);setFocusedUse(null);setFocusedFlow(null);setTab(from.tab);setSelectedId(from.workId);setSelectedUseId(from.parentId);setSelectedStageId(from.stageId);setStageFromUse(from.stageFromUse);setSelectedFlowId(from.flowId);setUseOriginFlow(from.useOriginFlow);
+    setFocusedWork(null);setFocusedUse(null);setFocusedFlow(null);setTab(from.tab);setSelectedId(selectedWorkFrom(from));setSelectedUseId(from.parentId);setSelectedStageId(from.stageId);setStageFromUse(from.stageFromUse);setSelectedFlowId(from.flowId);setUseOriginFlow(from.useOriginFlow);
     if (from.manage) setSurface(from.manage);
+  }
+  function openRelatedWork(workId) {
+    const sourceView = detailView.current;
+    const isSourceCurrent = () => detailView.current === sourceView;
+    return run(async () => {
+      const { items } = await api.rpc('query', { kind: 'work', workId, workspaceId: focusedWork.workspaceId, limit: 1 });
+      if (!viewIsCurrent() || currentSurface.current !== surface || !isSourceCurrent()) return false;
+      if (!items.some(item => item.id === workId && item.workspaceId === focusedWork.workspaceId)) throw new Error('此项目中的关联工作暂不可用。');
+      if (relatedParent?.from.workId === workId) returnFromReference();
+      else openReference({ id: workId, kind: 'work' });
+      return false;
+    }, undefined, isSourceCurrent);
   }
   function selectWork(work, parentUse = null, view, attention = false) { setAttentionWorkId(attention ? work.id : null); setRestoredView(view ? { workId: work.id, view } : null); setSelectedStageId(null); if (!parentUse) setUseOriginFlow(null); setSelectedUseId(parentUse?.id ?? null); setFocusedUse(parentUse); setWorkSource(parentUse); setSelectedId(work.id); setFocusedWork(work); setTab('work'); setRailPreference(true); setMobilePane('work'); }
   function openUse(use, stageId = null, fromUse = false) {
@@ -289,6 +316,20 @@ export function LoomPanel(props) {
   const busPending = !status?.context?.status || !status.context.workspaceId;
   const workspaces = snapshot ? snapshot.workspaces : [];
   const scopeReady = snapshot?.workspaceId === workspaceId;
+  const project = scopeReady && workspaceId && workspaceId !== status?.context?.workspaceId
+    ? workspaces.find(workspace => workspace.workspaceId === workspaceId) : undefined;
+  async function changeProjectCoordination() {
+    if (coordinationSaving) return;
+    const paused = !project.coordinationPaused;
+    setCoordinationSaving(true);
+    try {
+      return await run(async () => {
+        const saved = await api.rpc('command', { type: 'workspace.setCoordinationPaused', workspaceId, paused, expectedVersion: project.version });
+        const confirmed = (await readDirectory(true))?.find(workspace => workspace.workspaceId === workspaceId);
+        return confirmed?.coordinationPaused === paused && confirmed.version >= saved.version;
+      }, paused ? '项目协调已暂停。' : '项目协调已恢复。');
+    } finally { setCoordinationSaving(false); }
+  }
   const workflows = scopeReady ? snapshot.workflows : [];
   const workflowGroups = !workspaceId ? groupWorkflows(workflows, workspaces) : [];
   const list = workPage?.workspaceId === workspaceId && workPage.workflowFilter === workflowFilter && workPage.statusFilter === statusFilter ? workPage.list : null;
@@ -318,13 +359,20 @@ export function LoomPanel(props) {
   function openWorkDecision(row, decision) {
     if (decision === 'proposal') return reviewUse(row.proposal);
     const { work } = row;
-    selectWork(work, null, decision === 'result' ? '输出' : ['failed', 'external_input'].includes(decision) ? '报告' : '输入', decision !== 'execution');
+    selectWork(work, null, decision === 'result' ? '输出' : decision === 'external_input' ? '报告' : '输入', decision !== 'execution');
   }
   const guardedBusy = busy || loading || Boolean(connectionError);
   const railOpen = railPreference ?? Boolean(workspaces.length || list?.rows.length || snapshot?.uses.total || workflows.length);
   const last=trail.at(-1),relatedParent=last && ((tab==='work' && last.kind==='work' && last.to===selectedId) || (tab==='workflow' && last.kind==='workflow' && last.to===selectedFlowId)) ? last : null;
   const entry=restoredView ?? resume;
-  const parentLabel = relatedParent ? relatedParent.from.title : (focusedWork && selectedUseId && !selectedStageId) || (stageFromUse && selectedStageId) ? '本次工作' : useOriginFlow ? '工作流详情' : '工作列表';
+  const enteredWork = focusedWork && entry && (entry.workId === focusedWork.id || entry.stageId && entry.stageId === focusedWork.stageId && entry.parentId === focusedWork.useId);
+  useLayoutEffect(() => {
+    if (tab !== 'work' || !focusedWork) return;
+    evidenceOpen.current = Boolean(enteredWork && entry.evidenceOpen);
+    if (detailScroll.current) detailScroll.current.scrollTop = enteredWork ? entry.detailScrollTop ?? 0 : 0;
+  }, [tab, focusedWork?.id, entry, enteredWork]);
+  const pendingOnly = statusFilter.length === 1 && statusFilter[0] === 'interaction';
+  const parentLabel = relatedParent ? relatedParent.from.title : (focusedWork && selectedUseId && !selectedStageId) || (stageFromUse && selectedStageId) ? '本次工作' : useOriginFlow ? '工作流详情' : pendingOnly ? '待处理' : '工作列表';
   const workflowRow = flow => <button type="button" className="loom-work-row" key={flow.id} onClick={() => { setSelectedFlowId(flow.id); setFocusedFlow(flow); }}><div><strong>{flow.title}</strong><small>{flow.stages.length} 个步骤 · 版本 {flow.version}</small></div></button>;
 
   return <section className="loom-root" aria-label="Loom 工作台">
@@ -343,13 +391,18 @@ export function LoomPanel(props) {
     </nav>
     <div className="loom-split" data-rail-collapsed={!railOpen} data-mobile-pane={showingPage ? 'page' : mobilePane}>
       <section className="loom-management" aria-label="工作管理" inert={showingPage}>
-        <ProjectNavigation projects={workspaces} workspaceId={workspaceId} onChange={changeWorkspace} />
+        <ProjectNavigation projects={workspaces} workspaceId={workspaceId} onChange={changeWorkspace}>
+          {project && Number.isSafeInteger(project.version) && <button type="button" disabled={guardedBusy || coordinationSaving} onClick={changeProjectCoordination}>
+            {project.coordinationPaused ? '恢复项目协调' : '暂停项目协调'}
+          </button>}
+        </ProjectNavigation>
         <nav className="loom-tabs" aria-label="工作台面板">{[['work', '工作'], ['workflow', '工作流']].map(([id, label]) => <button type="button" key={id} aria-current={tab === id ? 'page' : undefined} onClick={() => setTab(id)}>{label}</button>)}</nav>
         {!snapshot || !status ? <Empty>{loading ? '正在读取工作台…' : '工作台暂时不可用，请重试连接。'}</Empty> : <>
           {tab === 'work' && (focusedWork || focusedUse ? <>
             <header className="loom-panel-header"><button type="button" aria-label={`返回${parentLabel}`} onClick={backFromDetail}>← {parentLabel}</button></header>
-            <div className="loom-detail-scroll">{focusedWork ? <WorkDetail key={focusedWork.id} work={focusedWork} works={detailWorks} workspaces={workspaces} workflows={workflows} source={workSource} onSave={work => saveWorks([work])} catalog={catalog} busy={guardedBusy} onAction={onAction} onConsent={work => openPage({ kind: 'consent', work: structuredClone(work) })} onAccept={work => setSurface({ kind: 'accept', work: structuredClone(work) })} onCancel={attentionWorkId === focusedWork.id ? undefined : work => setSurface({ kind: 'cancel', work: structuredClone(work) })} onOpenSession={openNativeSession} api={api}
-              initialView={entry && (entry.workId===focusedWork.id || entry.stageId && entry.stageId===focusedWork.stageId && entry.parentId===focusedWork.useId) ? entry.view : undefined} onViewChange={rememberView} onDelete={attentionWorkId === focusedWork.id ? undefined : work=>setSurface({kind:'deleteWork',work:structuredClone(work),key:crypto.randomUUID()})}
+            <div className="loom-detail-scroll" ref={detailScroll}>{focusedWork ? <WorkDetail key={focusedWork.id} work={focusedWork} works={detailWorks} workspaces={workspaces} workflows={workflows} source={workSource} onSave={work => saveWorks([work])} catalog={catalog} busy={guardedBusy} onAction={onAction} onConsent={work => openPage({ kind: 'consent', work: structuredClone(work) })} onAccept={work => setSurface({ kind: 'accept', work: structuredClone(work) })} onCancel={attentionWorkId === focusedWork.id ? undefined : work => setSurface({ kind: 'cancel', work: structuredClone(work) })} onOpenSession={openNativeSession} api={api}
+              initialView={enteredWork ? entry.view : undefined} onViewChange={rememberView} onDelete={attentionWorkId === focusedWork.id ? undefined : work=>setSurface({kind:'deleteWork',work:structuredClone(work),key:crypto.randomUUID()})}
+              onRelatedWork={openRelatedWork} initialEvidenceOpen={enteredWork && entry.evidenceOpen} rememberEvidence={open => { evidenceOpen.current = open; }}
               onOpenReport={(work,doc) => openPage({kind:'reader',title:doc.title,request:{workId:work.id,documentId:doc.id}})}
               onOpenFile={(work,file) => openPage({kind:'reader',title:file.title,request:{workId:work.id,runId:work.result.runId,index:work.result.deliverables.findIndex(item => item.path===file.path)}})} />
               : focusedUse.status !== 'confirmed' && selectedStageId && focusedUse.definitionSnapshot.stages.some(s => s.id === selectedStageId) ? <ProposedWorkDetail key={`${focusedUse.id}:${selectedStageId}`} proposal={focusedUse} stageId={selectedStageId} busy={guardedBusy} onManage={manageUse} onEdit={() => openPage({ kind: 'useWorkflow', proposal: focusedUse, fromDetail: true })} onReview={() => reviewUse(focusedUse)} />
@@ -389,7 +442,7 @@ export function LoomPanel(props) {
                 })}
               </section> : null;
             })}{!list?.rows.length && <Empty>
-              {connectionError ? '工作列表读取失败' : !statusFilter.length ? '请选择要查看的状态' : !list ? '正在读取工作…' : filtered ? '没有符合条件的工作' : workspaceId ? '此项目暂无工作' : '暂无工作'}
+              {connectionError ? '工作列表读取失败' : !statusFilter.length ? '请选择要查看的状态' : !list ? '正在读取工作…' : pendingOnly ? '暂无需要你处理的工作' : filtered ? '没有符合条件的工作' : workspaceId ? '此项目暂无工作' : '暂无工作'}
               {list && filtered && !connectionError && <button type="button" onClick={() => { changeWorkflowFilter(''); changeStatusFilter(allCategories); }}>清除筛选</button>}
             </Empty>}</div>
               {list?.hasMore && <button type="button" className="loom-load-more" aria-label="加载更多工作" disabled={loading} onClick={() => setWorkDepth(depth => depth + 1)}>加载更多</button>}</ListViewport>

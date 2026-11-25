@@ -258,6 +258,16 @@ input.loom-setting-control[type=checkbox]{flex:none;width:16px;height:16px;align
 dl.loom-summary,.loom-check-row dl{display:grid;grid-template-columns:80px minmax(0,1fr);gap:6px 10px;font-size:13px;margin:8px 0}
 .loom-summary dt,.loom-check-row dt{color:var(--loom-muted)}
 .loom-summary dd,.loom-check-row dd{min-width:0;margin:0;overflow-wrap:anywhere}
+.loom-detail .loom-coordination>.loom-summary{grid-template-columns:65px minmax(0,1fr);padding:4px 0;gap:5px 8px}
+.loom-coordination .loom-warning,.loom-coordination-receipt{margin:6px 0 8px;padding:8px 10px;border-radius:var(--dsw-radius-sm);overflow-wrap:anywhere}
+.loom-coordination .loom-warning{border:1px solid var(--dsw-alias-state-warn-primary)}
+.loom-coordination-receipt{background:var(--dsw-alias-state-success-tertiary);color:var(--loom-text);font-size:13px}
+.loom-coordination h4{margin:10px 0 4px;font-size:13px;font-weight:500}
+.loom-coordination time{font-variant-numeric:tabular-nums}
+.loom-coordination a,.loom-coordination button.loom-coordination-link,.loom-attention-action{color:var(--dsw-alias-link)}
+.loom-coordination button.loom-coordination-link{border-color:transparent;padding-inline:3px;text-align:start}
+.loom-management .loom-work-row:has(>.loom-attention-action) small{white-space:normal;overflow-wrap:anywhere}
+.loom-attention-action{flex:0 0 auto;max-width:8em;font-size:12px;text-align:end}
 .loom-result{min-width:0;padding:12px 0;border-top:1px solid var(--loom-border);overflow-wrap:anywhere}
 .loom-result p{white-space:pre-wrap;font-size:13px;line-height:21px}
 .loom-inline-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));align-items:start;gap:8px 12px;min-width:0}

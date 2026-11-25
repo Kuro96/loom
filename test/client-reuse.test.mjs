@@ -507,7 +507,7 @@ test('work detail surfaces live approval and the settled remote wait', async t =
   await view.update(props());
   await view.click('报告');
   assert.match(text(view.label('工作报告')), /清单已送达仓库/);
-  assert.match(text(view.label('工作报告')), /仓单 21.*收到签收记录/s);
+  assert.match(text(view.label('工作报告')), /收到签收记录.*仓单 21/s);
   assert.doesNotMatch(text(view.renderer.toJSON()), /审批确认/);
   assert.ok(!view.button('执行记录'));
   const waiting = f.store.getWork(draft.id), [workerDoc] = waiting.documents;

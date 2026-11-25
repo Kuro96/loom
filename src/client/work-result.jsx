@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ErrorNotice } from './components.jsx';
 import { statusLabel } from './state.mjs';
 import { handoffLabel, inputLabel, ValueDisplay } from './workflow-summary.jsx';
@@ -30,13 +30,117 @@ function Checks({ checks }) {
     </li>;
   })}</ul></>;
 }
-function WaitDetail({ wait, status }) {
+function PinnedSource({ api, source, workspaceId }) {
+  const { workId, runId, resultVersion, output } = source;
+  const [read, setRead] = useState(null), [attempt, retry] = useState(0);
+  useEffect(() => {
+    let active = true;
+    async function load() {
+      let after = null;
+      do {
+        const page = await api.rpc('query', { kind: 'run', workspaceId, workId, limit: 25, ...(after ? { after } : {}) });
+        if (!active) return;
+        const run = page.items.find(item => item.id === runId);
+        if (run) {
+          if (run.workId !== workId || run.workspaceId !== workspaceId || run.status !== 'completed' || run.resultVersion !== resultVersion || typeof run.outputs[output] !== 'string') break;
+          setRead({ value: run.outputs[output] });
+          return;
+        }
+        after = page.nextCursor;
+      } while (after !== null);
+      throw new Error('这次查证所用的来源结果暂不可读。');
+    }
+    void load().catch(error => { if (active) setRead({ error }); });
+    return () => { active = false; };
+  }, [api, workspaceId, workId, runId, resultVersion, output, attempt]);
+  return <section aria-label="已核实的来源"><h4>已核实的来源</h4><p className="loom-hint">已验收的文本 · 结果版本 {resultVersion}</p>
+    {read?.error ? <ErrorNotice error={read.error} onRetry={() => { setRead(null); retry(i => i + 1); }} />
+      : read ? <p className="loom-description">{read.value}</p> : <p role="status">正在读取查证所用的结果…</p>}</section>;
+}
+
+function SourceEvidence({ handoff }) {
+  const structured = handoff.evidence ?? [];
+  const cited = new Set();
+  const entries = structured.map(entry => {
+    if (entry.kind === 'github-ref') {
+      const branch = entry.ref.replace(/^refs\/heads\//, '');
+      const key = `GitHub ${entry.repository} ${entry.ref}`;
+      const url = /^[\w.-]+\/[\w.-]+$/.test(entry.repository) && /^refs\/heads\/[\w.-]+$/.test(entry.ref) &&
+        entry.url === `https://github.com/${entry.repository}/tree/${branch}` ? entry.url : null;
+      cited.add(key);
+      return <li key={key}><strong>{entry.repository} · {branch}</strong><p className="loom-description"><code>{entry.sha}</code></p>
+        <time dateTime={entry.observedAt}>{new Date(entry.observedAt).toLocaleString()}</time>
+        {url && <> · <a href={url} target="_blank" rel="noopener noreferrer">查看分支</a></>}</li>;
+    }
+    if (typeof entry.sessionId === 'string' && Number.isSafeInteger(entry.eventSeq) && typeof entry.snippet === 'string') {
+      const key = `DSH ${entry.sessionId} event ${entry.eventSeq}`;
+      cited.add(key);
+      return <li key={key}><strong>项目对话摘录</strong><p className="loom-description">{entry.snippet}</p><small className="loom-hint">消息位置 {entry.eventSeq}</small></li>;
+    }
+    return null;
+  });
+  return <ul className="loom-check-list">{entries}{handoff.sources.filter(source => !cited.has(source)).map((text, index) => <li key={index}>{text}</li>)}</ul>;
+}
+
+export function workWaitReason(wait) {
+  return wait.help?.missingInformation || wait.reason || wait.condition;
+}
+
+function WaitDetail({ wait, status, run, workspaceId, sessionId, api, onRelatedWork, pauseControls, projectPaused, questionControls, evidenceOpen, onEvidenceChange }) {
   if (!wait) return null;
-  return <section aria-label="外部操作"><h3>{wait.missingInformation ? '需要补充信息' : status === 'waiting' ? '等待外部结果' : wait.reason ? '远端结果待核实' : '远端操作'}</h3>
-    <dl className="loom-summary"><dt>远端引用</dt><dd>{wait.remoteRef}</dd>{wait.condition && <><dt>恢复条件</dt><dd>{wait.condition}</dd></>}{wait.checkMethod && <><dt>核对方法</dt><dd>{wait.checkMethod}</dd></>}{wait.nextCheckAt && <><dt>下次检查</dt><dd>{new Date(wait.nextCheckAt).toLocaleString()}</dd></>}{wait.reason && <><dt>待处理原因</dt><dd>{wait.reason}</dd></>}{wait.attempted && <><dt>已查来源</dt><dd>{wait.attempted}</dd></>}{wait.missingInformation && <><dt>需要补充</dt><dd>{wait.missingInformation}</dd></>}</dl>
-    {wait.handoff?.information && <section><h4>总控交接</h4><SummaryText>{wait.handoff.information}</SummaryText>
-      <details><summary>线索来源</summary><ul>{wait.handoff.sources.map((source, index) => <li key={index}>{source}</li>)}</ul></details></section>}
-    {status === 'cancelled' ? <p className="loom-warning">本地跟踪已结束 · 远端操作状态需另行核实</p> : status === 'waiting' && <p className="loom-hint">到期后由总控查找线索并安排下一步。</p>}
+  const { help, handoff, investigation } = wait;
+  const reason = workWaitReason(wait);
+  const waiting = status === 'waiting', paused = status === 'paused';
+  const question = paused && wait.missingInformation;
+  const nextCheck = waiting && !projectPaused && (wait.coordination?.retryAt ?? wait.nextCheckAt);
+  const source = handoff?.investigation?.source;
+  const admitted = handoff?.information && run?.observation?.admitted === true && run.sessionId === sessionId &&
+    run.wait?.operationId === wait.operationId && run.wait.handoff?.at === handoff.at;
+  const continuable = ['queued', 'dispatching', 'running'].includes(status);
+  const attempted = help?.attempted || (!handoff && wait.attempted);
+  const investigating = waiting && investigation?.status === 'pending';
+  return <section className="loom-coordination" aria-label="工作协调">
+    {question ? <p className="loom-warning">{question}</p>
+      : waiting && projectPaused ? <p className="loom-hint">项目协调已暂停</p>
+      : waiting ? <p className="loom-warning">{investigation?.status === 'pending' ? '后台正在查证' : investigation?.status === 'failed' ? '协查未核实结果，等待后台复查' : wait.coordination ? '已安排后台查证' : '等待后台复查'}</p>
+      : continuable && wait.information ? <p className="loom-coordination-receipt" role="status">已提交补充信息 · {status === 'running' ? '原工作执行中' : '等待原工作继续'}</p>
+      : admitted ? <p className="loom-coordination-receipt">已交回原工作</p>
+      : continuable && handoff?.information ? <p className="loom-coordination-receipt">已核实线索，等待原工作继续</p>
+      : paused ? <p className="loom-hint">已暂停自动协调</p>
+      : status === 'cancelled' && wait.remoteRef ? <p className="loom-warning">本地跟踪已结束 · 远端结果待核实</p> : null}
+    <dl className="loom-summary">
+      {reason && reason !== question && <><dt>{waiting || paused ? '卡点' : '原卡点'}</dt><dd>{reason}</dd></>}
+      {(waiting || paused && !question) && <><dt>负责人</dt><dd>项目后台总控</dd></>}
+      {investigation && <><dt>{investigating ? '当前动作' : '关联协查'}</dt><dd>
+        {onRelatedWork ? <button className="loom-coordination-link" type="button" onClick={() => onRelatedWork(investigation.workId)}>查看协查工作</button> : '协查工作'}（只读）</dd></>}
+      {waiting && !investigating && !projectPaused && <><dt>当前动作</dt><dd>{wait.checkMethod || (help ? '查证缺失信息' : '核对外部结果')}</dd></>}
+      {nextCheck && <><dt>下次检查</dt><dd><time dateTime={nextCheck}>{new Date(nextCheck).toLocaleString()}</time></dd></>}
+      {paused && !question && wait.nextCheckAt && <><dt>下次检查</dt><dd>恢复协调后复查</dd></>}
+      {wait.remoteRef && <><dt>远端引用</dt><dd>{wait.remoteRef}</dd></>}
+      {handoff?.information && <><dt>交接内容</dt><dd>{handoff.information}</dd></>}
+      {wait.information && <><dt>已补充</dt><dd>{wait.information}</dd></>}
+      {handoff?.information && <><dt>接收方</dt><dd>原工作</dd></>}
+      {admitted && status === 'running' && <><dt>下一步</dt><dd>原工作正在执行</dd></>}
+    </dl>
+    {pauseControls}{questionControls}
+    {(attempted || help?.expectedEvidence || handoff) && <details open={evidenceOpen} onToggle={event => onEvidenceChange(event.currentTarget.open)}><summary>查看查证记录</summary>
+      {attempted && <><h4>已查来源</h4><SummaryText>{attempted}</SummaryText></>}
+      {help?.expectedEvidence && <><h4>需要核实的证据</h4><SummaryText>{help.expectedEvidence}</SummaryText></>}
+      {handoff && !source && evidenceOpen && <SourceEvidence handoff={handoff} />}
+      {source && evidenceOpen && <PinnedSource key={`${source.runId}:${source.resultVersion}:${source.output}`} {...{ api, source, workspaceId }} />}
+    </details>}
+  </section>;
+}
+
+function InvestigationDetail({ investigation, result, api, workspaceId, onRelatedWork, evidenceOpen, onEvidenceChange }) {
+  if (!investigation) return null;
+  const verified = result?.review?.source === 'native-investigation' && result.review.passed && result.acceptance;
+  return <section className="loom-coordination" aria-label="只读协查">
+    <dl className="loom-summary"><dt>原工作</dt><dd>{onRelatedWork && <button className="loom-coordination-link" type="button" onClick={() => onRelatedWork(investigation.parentWorkId)}>查看原工作</button>}</dd>
+      <dt>范围</dt><dd>读取本项目已验收的固定版本文本</dd></dl>
+    {verified && <details open={evidenceOpen} onToggle={event => onEvidenceChange(event.currentTarget.open)}><summary>查看查证记录</summary>
+      {evidenceOpen && <PinnedSource {...{ api, workspaceId }} source={investigation.source} />}
+    </details>}
   </section>;
 }
 
@@ -56,9 +160,22 @@ export function pendingInteraction(run) {
   const kinds = run.pendingInput ?? (run.diagnostic?.startsWith('等待原生交互：') ? run.diagnostic.slice('等待原生交互：'.length).split('、') : []);
   if (kinds.includes('approval')) return '请在执行对话中处理审批确认。';
   if (kinds.includes('question')) return '请在执行对话中补充输入。';
+  const observation = run.observation;
+  if (observation?.questionReceipts?.some(receipt => ['open', 'continued'].includes(receipt.status) &&
+      receipt.sessionId === run.sessionId && receipt.requestId === run.requestId &&
+      observation.questionCalls.some(call => call.callSeq === receipt.callSeq))) return '原生提问仍待回答，请打开执行对话。';
   return kinds.length ? '执行对话中有待处理请求。' : null;
 }
 
+function NativeDiagnostic({ run }) {
+  const fault = run?.nativeFault;
+  if (fault?.scope !== 'run') return null;
+  const retry = new Date(fault.retryAt);
+  return <section className="loom-coordination" aria-label="执行诊断"><p className="loom-warning" role="status">执行状态待核对</p>
+    <dl className="loom-summary"><dt>当前动作</dt><dd>{fault.operation}</dd><dt>下次检查</dt><dd><time dateTime={retry.toISOString()}>{retry.toLocaleString()}</time></dd></dl>
+    {run.diagnostic && <details><summary>技术详情</summary><p className="loom-description">{run.diagnostic}</p></details>}
+  </section>;
+}
 
 function SourceName({ works, refValue }) {
   const source = works.find(item => item.id === refValue.workId);
@@ -157,7 +274,7 @@ function ReportEntries({ documents, onOpen }) {
   });
 }
 
-export function WorkReport({ result, status, wait, run, documents = [], onOpen, retry }) {
+export function WorkReport({ result, status, wait, investigation, run, workspaceId, sessionId, api, documents = [], onOpen, onRelatedWork, retry, pauseControls, projectPaused, questionControls, evidenceOpen = false, onEvidenceChange }) {
   const [showHistory, setShowHistory] = useState(false);
   const runId = result?.runId ?? run?.id;
   const byRun = new Map();
@@ -169,10 +286,13 @@ export function WorkReport({ result, status, wait, run, documents = [], onOpen, 
   byRun.delete(runId);
   return <section aria-label="工作报告"><h3>工作报告</h3>
     <ReportEntries documents={current} onOpen={onOpen} />
+    <WaitDetail {...{ wait, status, run, workspaceId, sessionId, api, onRelatedWork, pauseControls, projectPaused, questionControls, evidenceOpen, onEvidenceChange }} />
+    <InvestigationDetail {...{ investigation, result, api, workspaceId, onRelatedWork, evidenceOpen, onEvidenceChange }} />
+    <NativeDiagnostic run={run} />
     {result ? <>{result.summary && <><h4>执行摘要</h4><SummaryText label="完整摘要">{result.summary}</SummaryText></>}
       <Checks checks={result.checks ?? []} /><Verdict result={result} retry={retry} />
       {!result.acceptance && <p className="loom-hint">{status === 'review' ? '待验收' : '尚未验收'}</p>}
-    </> : <><SummaryText>{run?.summary || (!current.length && (status === 'proposed' ? '尚未执行' : '本次暂无执行报告'))}</SummaryText><WaitDetail wait={wait} status={status} /></>}
+    </> : <SummaryText>{run?.summary || (!wait && !investigation && !run?.nativeFault && !current.length && (status === 'proposed' ? '尚未执行' : '本次暂无执行报告'))}</SummaryText>}
     {byRun.size > 0 && <div className="loom-actions"><button type="button" aria-expanded={showHistory} onClick={() => setShowHistory(value => !value)}>查看以往报告</button></div>}
     {byRun.size > 0 && showHistory && <section aria-label="以往报告">{Array.from(byRun, ([id, docs]) => <section key={id}>
       <p className="loom-hint">报告时间：{new Date(docs[0].createdAt).toLocaleString()}</p><ReportEntries documents={docs} onOpen={onOpen} />
