@@ -326,6 +326,18 @@ export class LoomEngine {
       this.saveObservation(current.run,observation,pending??`会话仍有活动：${JSON.stringify({running:state.running,queue:state.queue,activity})}`,state.pendingInput);
       return;
     }
+    if(observation.pendingJobs.length) {
+      if(state.cursor>observed.state.cursor) {
+        // A job can settle after the bounded event read but before the idle check.
+        this.saveObservation(current.run,observation,pending,state.pendingInput);
+        return;
+      }
+      const message='后台作业结果待核对：原生历史缺少结算回执。';
+      this.saveObservation(current.run,observation,message,state.pendingInput);
+      this.store.finishRun(run.id,{reason:'native-job-outcome-unknown',summary:message,eventCursor:observation.cursor,
+        review:{passed:false,summary:message,source:'native-job',evidence:observation.pendingJobs}});
+      return;
+    }
     this.saveObservation(current.run,observation,pending,state.pendingInput);
     const completion=observation.completion;
     if(completion.reason!=='completed') {
