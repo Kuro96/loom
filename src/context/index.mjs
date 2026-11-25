@@ -413,9 +413,18 @@ export async function createLoomContext(ctx, options) {
     })();
     return disposal;
   }
+  function mainBusBusy() {
+    const current=state.value.current;
+    if(current===null) return false;
+    const agent=ctx.agents.get(current.sessionId);
+    return agent!==undefined && (agent.status!=='idle' || agent.inbox.nextTurn.length>0 || agent.inbox.nextStep.length>0);
+  }
   return {
     ensureBus,
-    ...(projects===null?{}:{dispatchExternalWait:(workspaceId,claim)=>projects.dispatch(workspaceId,claim),stopCoordination:()=>projects.dispose()}),
+    ...(projects===null?{}:{dispatchExternalWait(workspaceId,claim){
+      if(mainBusBusy()) return Promise.resolve();
+      return projects.dispatch(workspaceId,()=>mainBusBusy()?null:claim());
+    },stopCoordination:()=>projects.dispose()}),
     bindAgent,bindCurrent,
     getBus:()=>structuredClone(state.value.current),
     getUsage:payload=>usage.query(state.value.busId,payload),

@@ -124,6 +124,16 @@ for (const scenario of ['related','original','retry','missing','help']) test(`ex
       work=await rpc('command',{type:'work.confirm',workId:work.id,expectedVersion:work.version});
       const fetchWork=async()=>(await rpc('query',{kind:'work',workId:work.id})).items[0];
       const until=async predicate=>{for(let i=0;i<180;i++){const value=await fetchWork();if(predicate(value))return value;assert.ok(!searchReply?.error,searchReply?.error);if(found && value.status==='paused')break;await delay(50);}assert.fail(`The coordinator did not settle the wait: ${JSON.stringify(pages)}`);};
+      if(help) {
+        await until(value=>value.wait?.kind==='help');
+        for(let cycle=0;cycle<5;cycle++) {await rpc('tick');await delay(40);}
+        assert.notEqual(host.ctx.agents.get(busId).status,'idle');
+        const events=(await rpc('query',{kind:'event',workId:work.id})).items;
+        assert.equal(events.filter(event=>event.type==='work.waitCoordination').length,0,'hold the original queue while the main coordinator is busy');
+        assert.equal((await fetchWork()).status,'waiting');
+        releaseMain.resolve();
+        await deadline(host.ctx.agents.get(busId).whenIdle(),'visible coordinator released');
+      }
       if(found) {
         await until(value=>value.wait?.handoff?.information);
         const resumed=await deadline(worker.promise,'worker receives coordinator handoff',9000);
@@ -137,7 +147,8 @@ for (const scenario of ['related','original','retry','missing','help']) test(`ex
         assert.notEqual(coordinatorId,busId);
         assert.ok(host.workspace.sessionIds.includes(coordinatorId));
         if(help) {
-          assert.notEqual(host.ctx.agents.get(busId).status,'idle');
+          const events=(await rpc('query',{kind:'event',workId:work.id})).items;
+          assert.equal(events.filter(event=>event.type==='work.waitCoordination').length,1);
           assert.equal(runs[1].wait.kind,'help');
           assert.equal(runs[1].wait.help.expectedEvidence,'A version and its ledger entry');
           assert.equal(runs[1].wait.source.callId,'initial-help');
