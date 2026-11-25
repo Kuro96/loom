@@ -1,4 +1,4 @@
-import { foldRunEvents } from './events.mjs';
+import { applyQuestionUpdates, foldRunEvents, questionEventCallId, questionUpdates } from './events.mjs';
 import { applyPermissionPreset } from '../permissions.mjs';
 import { isProjectCoordinatorSessionId } from '../context/project-coordinator.mjs';
 
@@ -13,12 +13,12 @@ export class NativeRunFailure extends Error {
   }
 }
 
-async function nativeIO(operation,call,signal) {
+async function nativeIO(operation,call,signal,readSession=false) {
   try { return await call(); }
   catch(error) {
     signal.throwIfAborted();
     const code=error?.code==='gateway/internal'?error.cause?.code:error?.code;
-    if(!retryableIO.has(code) && !retryableSession.has(code)) throw error;
+    if(!retryableIO.has(code) && !retryableSession.has(code) && !(readSession && unreadableSession.has(code))) throw error;
     throw new NativeRunFailure(operation,code,error);
   }
 }
@@ -48,7 +48,11 @@ export class NativeHarness {
     return selection;
   }
 
-  state(sessionId) { return nativeIO('读取会话状态',()=>this.ctx.sessionController.state({sessionId},this.signal),this.signal); }
+  state(sessionId) { return nativeIO('读取会话状态',()=>this.ctx.sessionController.state({sessionId},this.signal),this.signal,true); }
+  liveCursor(sessionId) {
+    const agent=this.ctx.agents.get(sessionId);
+    return agent===undefined ? -1 : agent.session.seq-1;
+  }
 
   activity(sessionId) {
     return nativeIO('读取会话活动',()=>this.ctx.waterfall('workspace/session-activity',{sessionId},()=>Promise.resolve([])),this.signal);
@@ -56,18 +60,39 @@ export class NativeHarness {
 
   async eventsSince(sessionId,cursor) {
     const state=await this.state(sessionId);
+    return {state,records:await this.eventRecords(sessionId,cursor,state.cursor)};
+  }
+
+  async eventRecords(sessionId,cursor,throughSeq,include=()=>true) {
     const records=[];
     let beforeSeq;
     while(true) {
-      const page=await nativeIO('读取会话事件',()=>this.ctx.sessionController.events({address:{kind:'session',sessionId},throughSeq:state.cursor,maxMessages:200,...(beforeSeq===undefined?{}:{beforeSeq})},this.signal),this.signal);
-      const fresh=page.records.filter(record=>record.event.seq>cursor);
+      const page=await nativeIO('读取会话事件',()=>this.ctx.sessionController.events({address:{kind:'session',sessionId},throughSeq,maxMessages:200,...(beforeSeq===undefined?{}:{beforeSeq})},this.signal),this.signal,true);
+      const fresh=page.records.filter(record=>record.event.seq>cursor && include(record.event));
       records.unshift(...fresh);
       if(!page.hasMore || page.records.length===0 || page.records[0].event.seq<=cursor) break;
       const next=page.records[0].event.seq;
       if(beforeSeq!==undefined && next>=beforeSeq) throw new Error('原生会话分页游标未前移');
       beforeSeq=next;
     }
-    return {state,records};
+    return records;
+  }
+
+  async questionProjection(sessionId,throughSeq) {
+    const projection=await nativeIO('读取原生提问投影',()=>this.ctx.sessionController.projections({sessionId},this.signal),this.signal,true);
+    if(projection?.kind!=='sequenced' || projection.values.userQuestions===undefined || projection.asOfSeq<throughSeq) return null;
+    return {asOfSeq:projection.asOfSeq,view:projection.values.userQuestions};
+  }
+
+  async observeQuestions(sessionId,observation,{asOfSeq,view}) {
+    const updates=questionUpdates(observation,view);
+    if(updates.length===0) return observation;
+    const callIds=new Set(updates.map(({callId})=>callId));
+    // A projection row may have originated before this Run's initial cursor.
+    const answering=updates.some(({status})=>status==='settled');
+    const history=await this.eventRecords(sessionId,-1,asOfSeq,event=>callIds.has(questionEventCallId(event)) ||
+      (answering && (event.type==='turn/start' || event.type==='turn/end')));
+    return applyQuestionUpdates(observation,updates,history,asOfSeq);
   }
 
   async validateAssociation(workspaceId,sessionId) {

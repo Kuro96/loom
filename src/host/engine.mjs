@@ -8,6 +8,7 @@ import { redact } from '../context/budget.mjs';
 
 const MAX_DELIVERIES=3;
 const MAX_PROJECT_COORDINATORS=2;
+const MAX_FINAL_QUESTION_READS=3;
 
 /** Persist intent before sending and reconcile native execution before acceptance. */
 export class LoomEngine {
@@ -301,18 +302,89 @@ export class LoomEngine {
     if(Object.entries(patch).some(([key,value])=>!isDeepStrictEqual(run[key]??null,value))) this.store.updateRun(run.id,patch);
   }
 
-  async observeRun(runId,signal) {
+  async readObservation(runId,signal) {
     let current=this.currentRun(runId,signal);
-    if(current===null) return;
-    let {run}=current;
+    if(current===null) return null;
+    const {run}=current;
     const observed=await this.native.eventsSince(run.sessionId,run.cursor);
     current=this.currentRun(runId,signal);
+    if(current===null) return null;
+    const previous=current.run.observation;
+    let recoveredCalls;
+    if(previous?.admitted===true && previous.questionCalls===undefined) {
+      const prefix=await this.native.eventRecords(run.sessionId,-1,run.cursor,event=>event.type==='turn/start' || event.type==='turn/end' ||
+        event.type==='user/message' && event.data.source.rpcId===run.requestId || event.type==='tool/call' && event.data.name==='ask_user_question');
+      current=this.currentRun(runId,signal);
+      if(current===null) return null;
+      const recovered=foldRunEvents({...run,cursor:-1,observation:null},prefix);
+      recoveredCalls=recovered.ownedTurn===previous.ownedTurn?recovered.questionCalls:[];
+    }
+    const fold=records=>foldRunEvents(recoveredCalls===undefined?current.run:
+      {...current.run,observation:{...current.run.observation,questionCalls:recoveredCalls}},records);
+    let observation=fold(observed.records);
+    let questionThroughSeq=null;
+    if(observation.questionCalls.length) {
+      const projection=await this.native.questionProjection(run.sessionId,observed.state.cursor);
+      current=this.currentRun(runId,signal);
+      if(current===null) return null;
+      if(projection!==null) {
+        if(projection.asOfSeq>observed.state.cursor) {
+          const tail=await this.native.eventRecords(run.sessionId,observed.state.cursor,projection.asOfSeq);
+          current=this.currentRun(runId,signal);
+          if(current===null) return null;
+          // Reports can be registered while the native projection advances.
+          observation=fold([...observed.records,...tail]);
+        }
+        observation=await this.native.observeQuestions(run.sessionId,observation,projection);
+        current=this.currentRun(runId,signal);
+        if(current===null) return null;
+        questionThroughSeq=projection.asOfSeq;
+      }
+    }
+    return {run:current.run,observation,state:observed.state,questionThroughSeq};
+  }
+
+  async finishWithQuestions(runId,finish,signal) {
+    let detail='会话事件持续变化，已保留最后确认的提问记录。';
+    try {
+      for(let attempt=0;attempt<MAX_FINAL_QUESTION_READS;attempt++) {
+        const reading=await this.readObservation(runId,signal);
+        if(reading===null) return;
+        const sessionId=reading.run.sessionId;
+        const state=await this.native.state(sessionId);
+        const current=this.currentRun(runId,signal);
+        if(current===null) return;
+        this.saveObservation(current.run,reading.observation,current.run.diagnostic??null,current.run.pendingInput??[]);
+        if(reading.questionThroughSeq===null) {
+          detail='原生投影当前不可用，已保留最后确认的提问记录。';
+          break;
+        }
+        // Fence the live session and commit in the same host turn.
+        if(Math.max(state.cursor,this.native.liveCursor(sessionId))<=reading.questionThroughSeq) {
+          this.store.finishRun(runId,finish);
+          return;
+        }
+      }
+    } catch(error) {
+      if(!(error instanceof NativeRunFailure)) throw error;
+      detail=error.message;
+    }
+    // Verification has already run. Keep its result and the last question cut when a stable read is unavailable.
+    const current=this.currentRun(runId,signal);
     if(current===null) return;
-    run=current.run;
-    const observation=foldRunEvents(run,observed.records);
-    const diagnostic=observed.state.pendingInput.length?`等待原生交互：${observed.state.pendingInput.join('、')}`:null;
+    const message=redact(`原生问题的最终状态待核对：${detail}`);
+    this.store.updateRun(runId,{diagnostic:[current.run.diagnostic,message].filter(Boolean).join('；')});
+    this.store.finishRun(runId,finish);
+  }
+
+  async observeRun(runId,signal) {
+    const reading=await this.readObservation(runId,signal);
+    let current=this.currentRun(runId,signal);
+    if(reading===null || current===null) return;
+    const {run,observation,state:observedState}=reading;
+    const diagnostic=observedState.pendingInput.length?`等待原生交互：${observedState.pendingInput.join('、')}`:null;
     if(observation.completion===null) {
-      this.saveObservation(run,observation,diagnostic,observed.state.pendingInput);
+      this.saveObservation(current.run,observation,diagnostic,observedState.pendingInput);
       return;
     }
     const activity=await this.native.activity(run.sessionId);
@@ -322,12 +394,18 @@ export class LoomEngine {
     if(current===null) return;
     const pending=state.pendingInput.length?`等待原生交互：${state.pendingInput.join('、')}`:null;
     const queued=state.queue!==null && state.queue.length>0;
-    if(observed.state.running || state.running || queued || state.pendingInput.length || activity.length) {
+    if(observedState.running || state.running || queued || state.pendingInput.length || activity.length) {
       this.saveObservation(current.run,observation,pending??`会话仍有活动：${JSON.stringify({running:state.running,queue:state.queue,activity})}`,state.pendingInput);
       return;
     }
+    if(state.cursor>observation.cursor && observation.questionCalls.length &&
+      observation.questionReceipts?.some(({status})=>status==='open' || status==='continued')) {
+      // A native reply may be admitted between the question snapshot and the idle check.
+      this.saveObservation(current.run,observation,pending,state.pendingInput);
+      return;
+    }
     if(observation.pendingJobs.length) {
-      if(state.cursor>observed.state.cursor) {
+      if(state.cursor>observedState.cursor) {
         // A job can settle after the bounded event read but before the idle check.
         this.saveObservation(current.run,observation,pending,state.pendingInput);
         return;
@@ -376,7 +454,11 @@ export class LoomEngine {
     if(review.passed && run.reportFormat==='bilingual-v1' && !candidate?.report.document && !Object.keys(candidate?.report.outputs??{}).length) {
       review={passed:false,source:'native-report',summary:'本次执行缺少实施者的双语报告，请核对摘要或要求补充。',evidence:{preAcceptance:review}};
     }
-    this.store.finishRun(run.id,{reason:completion.reason,summary,eventCursor:completion.endSeq,checks,review,...(reportCallId===undefined?{}:{reportCallId})});
+    const finish={reason:completion.reason,summary,eventCursor:completion.endSeq,checks,review,...(reportCallId===undefined?{}:{reportCallId})};
+    if(observation.questionReceipts?.some(receipt=>receipt.status!=='settled' && observation.questionCalls.some(call=>call.callSeq===receipt.callSeq))) {
+      return this.finishWithQuestions(runId,finish,signal);
+    }
+    this.store.finishRun(run.id,finish);
   }
 
   control() {

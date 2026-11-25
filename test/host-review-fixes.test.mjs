@@ -222,6 +222,288 @@ test('native job settlement leaves an unanswered native question on the running 
   }finally{await host.release();await host.close();}
 });
 
+function questionCall(callId,id,text,timeout=1) {
+  return {index:0,id:callId,type:'function',function:{name:'ask_user_question',arguments:JSON.stringify({questions:[{id,question:text}],timeout})}};
+}
+
+async function timedQuestions(host) {
+  for(const [name,config] of [['dsh-user-questions',{}],['dsh-tool-ask-user',{mode:'timed',timeout:1}]]) {
+    const mod=native(name);await deadline(host.root.plugin(mod.default??mod,config).await(),`load ${name}`);
+  }
+  let questions;
+  await host.root.plugin({name:'question-test-reader',inject:['userQuestions'],apply(ctx){questions=ctx.userQuestions;}}).await();
+  return questions;
+}
+
+function questionOrigin(log,run,callId) {
+  const admission=log.find(e=>e.type==='user/message' && e.data.source.rpcId===run.requestId);
+  assert.ok(admission);
+  const turn=log.findLast(e=>e.type==='turn/start' && e.seq<admission.seq).data.turn;
+  const call=log.find(e=>e.type==='tool/call' && e.data.turn===turn && e.data.callId===callId && e.data.name==='ask_user_question');
+  assert.ok(admission.seq<call.seq);
+  return {sessionId:run.sessionId,requestId:run.requestId,turn,step:call.data.step,callId,callSeq:call.seq};
+}
+
+test('a continued native timed question survives on its original Run after SQLite reopen',{skip:!installed,timeout:30000},async()=>{
+  const callId='timed-dataset-version',question='Which private dataset version applies?';
+  const continued=Promise.withResolvers(),release=Promise.withResolvers();
+  let step=0,questions;
+  const host=await fixture(async(_wire,_req,res)=>{
+    if(++step===1) return stream(res,{tool_calls:[questionCall(callId,'version',question)]},'tool_calls');
+    if(step===2) {continued.resolve();await release.promise;return report(res,'timed-question-report');}
+    stream(res,{content:'Noted.'});
+  },async host=>{questions=await timedQuestions(host);});
+  const controller=host.ctx.sessionController,{projections}=controller;
+  try {
+    const work=await host.create(host.workspace.id,'定时原生问题',{},false);
+    await deadline(continued.promise,'provider resumed after timed question');
+    const run=await observedRun(host,work.id,r=>r.status==='running');
+    const address={sessionId:run.sessionId},signal=AbortSignal.timeout(6000);
+    const agent=host.ctx.agents.get(run.sessionId);
+    assert.deepEqual((await controller.state(address,signal)).pendingInput,[]);
+    assert.deepEqual((await controller.projections(address,signal)).values.userQuestions.active.map(({callId,state})=>({callId,state})),[{callId,state:'continued'}]);
+    const origin=questionOrigin(agent.session.snapshotEvents(),run,callId);
+    let crossed=false;
+    controller.projections=async(request,signal)=>{
+      if(request.sessionId===run.sessionId && !crossed) {
+        crossed=true;
+        release.resolve();
+        await deadline(agent.whenIdle(),'worker reported during the projection read');
+      }
+      return projections.call(controller,request,signal);
+    };
+    const {work:completed}=await host.settled(work.id);
+    assert.equal(crossed,true);
+    assert.equal(completed.status,'review');
+    assert.deepEqual(completed.result.outputs,{artifact:{batch:'B'}});
+    const {items,total}=await host.runs(work.id);
+    assert.equal(total,1);
+    const [saved]=items;
+    assert.equal(saved.id,run.id);
+    const [receipt]=saved.observation.questionReceipts??[];
+    assert.ok(receipt,'Loom did not save the continued timed question');
+    const {asOfSeq,...evidence}=receipt;
+    assert.deepEqual(evidence,{...origin,status:'continued'});
+    assert.ok(asOfSeq>=origin.callSeq && asOfSeq<=saved.cursor);
+    assert.deepEqual(saved.pendingInput,[]);
+    assert.equal(JSON.stringify(saved.observation).includes(question),false);
+    const answer='private-late-answer';
+    assert.equal(questions.answer(agent,callId,{answers:[{id:'version',selected:[],custom:answer}]}),true);
+    await deadline(agent.whenIdle(),'answer admitted after original Run ended');
+    const reply=agent.session.snapshotEvents().find(e=>e.type==='user/message' && e.data.source.kind==='user-question-reply');
+    assert.equal(reply.data.source.callId,callId);
+    assert.equal((await host.runs(work.id)).total,1);
+    assert.deepEqual((await host.runs(work.id)).items[0].observation.questionReceipts,[receipt]);
+    assert.equal((await host.getWork(work.id)).status,'review');
+    await host.plugin.dispose();
+    const reopened=new LoomStore(join(host.loomDirectory,'loom.sqlite'));
+    try {assert.deepEqual(reopened.getRun(run.id).observation.questionReceipts,[receipt]);}
+    finally {reopened.close();}
+  } finally {controller.projections=projections;release.resolve();await host.close();}
+});
+
+test('the final observation catches an admitted native answer before the original Run settles',{skip:!installed,timeout:30000},async()=>{
+  const callId='answered-while-running',answer='private-native-answer';
+  const continued=Promise.withResolvers(),finish=Promise.withResolvers();
+  let step=0,questions,restoreActivity;
+  const host=await fixture(async(wire,_req,res)=>{
+    if(acceptance(wire)) return stream(res,{content:verdict()});
+    if(++step===1) return stream(res,{tool_calls:[questionCall(callId,'version','Which release is current?')]},'tool_calls');
+    if(step===2) {continued.resolve();await finish.promise;return report(res,'answered-question-report');}
+    stream(res,{content:'Noted.'});
+  },async host=>{questions=await timedQuestions(host);});
+  try {
+    const work=await host.create(host.workspace.id,'运行中回复定时问题',{},false);
+    await deadline(continued.promise,'native question timed out');
+    const run=await observedRun(host,work.id,r=>r.observation.questionReceipts?.some(item=>item.status==='continued'));
+    const agent=host.ctx.agents.get(run.sessionId),log=()=>agent.session.snapshotEvents();
+    const origin=questionOrigin(log(),run,callId);
+    let submitted=false;
+    restoreActivity=host.ctx.on('workspace/session-activity',async({sessionId},next)=>{
+      const activity=await next();
+      if(sessionId!==run.sessionId || submitted || !log().some(e=>e.type==='turn/end' && e.data.turn===origin.turn)) return activity;
+      submitted=true;
+      assert.equal((await host.runs(work.id)).items[0].observation.questionReceipts[0].status,'continued');
+      assert.equal(questions.answer(agent,callId,{answers:[{id:'version',selected:[],custom:answer}]}),true);
+      assert.equal(log().some(e=>e.type==='user/message' && e.data.source.kind==='user-question-reply'),false);
+      await deadline(agent.whenIdle(),'answer admitted in the final observation window');
+      return activity;
+    },{prepend:true});
+    finish.resolve();
+    assert.equal((await host.settled(work.id)).work.status,'review');
+    const reply=log().find(e=>e.type==='user/message' && e.data.source.kind==='user-question-reply');
+    assert.ok(reply);
+    assert.deepEqual(reply.data.source,{kind:'user-question-reply',callId,outcome:'answered'});
+    assert.equal(JSON.stringify(reply.data.content).includes(answer),true);
+    const answeringTurn=log().findLast(e=>e.type==='turn/start' && e.seq<reply.seq).data.turn;
+    assert.ok(answeringTurn>origin.turn);
+    const [answered]=(await host.runs(work.id)).items;
+    assert.equal(answered.id,run.id);
+    const [receipt]=answered.observation.questionReceipts;
+    const {asOfSeq,...evidence}=receipt;
+    assert.deepEqual(evidence,{...origin,status:'settled',reply:{kind:'user-question-reply',seq:reply.seq,turn:answeringTurn,messageId:reply.data.id,outcome:'answered'}});
+    assert.ok(reply.seq<=asOfSeq && asOfSeq<=answered.cursor);
+    assert.equal(JSON.stringify(answered.observation).includes(answer),false);
+    await host.plugin.dispose();
+    const reopened=new LoomStore(join(host.loomDirectory,'loom.sqlite'));
+    try {assert.deepEqual(reopened.getRun(run.id).observation.questionReceipts,[receipt]);}
+    finally {reopened.close();}
+  } finally {if(restoreActivity) restoreActivity();finish.resolve();await host.close();}
+});
+
+for(const readFault of [false,true]) test(readFault?'a final native persistence read failure keeps the original verification':
+  'an answer admitted after the final projection is saved before the Run finishes',{skip:!installed,timeout:30000},async()=>{
+  const callId='answer-in-review',reviewStarted=Promise.withResolvers(),releaseReview=Promise.withResolvers();
+  let step=0,reviews=0,questions;
+  const host=await fixture(async(wire,_req,res)=>{
+    if(acceptance(wire)) {reviews++;reviewStarted.resolve();await releaseReview.promise;return stream(res,{content:verdict()});}
+    if(++step===1) return stream(res,{tool_calls:[questionCall(callId,'version','Which version applies?')]},'tool_calls');
+    if(step===2) return report(res,'answer-in-review-result');
+    stream(res,{content:'Noted.'});
+  },async host=>{questions=await timedQuestions(host);});
+  const mark="require('fs').appendFileSync('question-check-count.txt','once\\n')";
+  const controller=host.ctx.sessionController,{projections,events}=controller;
+  try {
+    const work=await host.create(host.workspace.id,'预验收期间收到原生回答',{checks:[{kind:'command',command,args:['-e',mark]}]},false);
+    await deadline(reviewStarted.promise,'pre-acceptance entered');
+    const [run]=(await host.runs(work.id)).items;
+    assert.equal(run.status,'running');
+    assert.equal(run.observation.questionReceipts[0].status,'continued');
+    const agent=host.ctx.agents.get(run.sessionId);
+    let reply,cut;
+    const answer=async()=>{
+      assert.equal(questions.answer(agent,callId,{answers:[{id:'version',selected:[],custom:'verified version'}]}),true);
+      await deadline(agent.whenIdle(),'native answer admitted before finalization');
+      reply=agent.session.snapshotEvents().find(event=>event.type==='user/message' && event.data.source.kind==='user-question-reply');
+      assert.ok(reply);
+    };
+    if(readFault) {
+      await answer();
+      const {SessionQueryError}=native('dsh-session-query');
+      controller.events=async(request,signal)=>{
+        if(request.address.sessionId===run.sessionId) throw new SessionQueryError('stored session unavailable','SESSION_QUERY_PERSISTENCE_FAILED');
+        return events.call(controller,request,signal);
+      };
+    } else {
+      controller.projections=async(request,signal)=>{
+        const snapshot=await projections.call(controller,request,signal);
+        if(request.sessionId===run.sessionId && reply===undefined) {
+          cut=snapshot.asOfSeq;
+          await answer();
+          assert.ok(reply.seq>cut);
+        }
+        return snapshot;
+      };
+    }
+    releaseReview.resolve();
+    assert.equal((await host.settled(work.id)).work.status,'review');
+    const [saved]=(await host.runs(work.id)).items;
+    const [receipt]=saved.observation.questionReceipts;
+    if(readFault) {
+      assert.deepEqual(receipt,run.observation.questionReceipts[0]);
+      assert.match(saved.diagnostic,/最终状态待核对.*SESSION_QUERY_PERSISTENCE_FAILED/);
+    } else {
+      assert.equal(receipt.status,'settled');
+      assert.equal(receipt.reply.seq,reply.seq);
+      assert.ok(receipt.asOfSeq>cut);
+    }
+    assert.equal(reviews,1);
+    const checks=(await readFile(join(host.workspace.path,'question-check-count.txt'),'utf8')).trim().split(/\r?\n/);
+    assert.deepEqual(checks,['once']);
+  } finally {controller.projections=projections;controller.events=events;releaseReview.resolve();await host.close();}
+});
+
+test('an active earlier-format Run recovers question calls already consumed by its cursor',{skip:!installed,timeout:30000},async()=>{
+  const callId='older-run-timed-question',continued=Promise.withResolvers(),release=Promise.withResolvers();
+  let step=0;
+  const host=await fixture(async(wire,_req,res)=>{
+    if(acceptance(wire)) return stream(res,{content:verdict()});
+    if(++step===1) return stream(res,{tool_calls:[questionCall(callId,'version','Which version applies?')]},'tool_calls');
+    continued.resolve();await release.promise;return report(res,'older-run-result');
+  },timedQuestions);
+  try {
+    const work=await host.create(host.workspace.id,'升级前已读定时问题',{},false);
+    await deadline(continued.promise,'native timed call already continued');
+    const run=await observedRun(host,work.id,r=>r.observation.questionReceipts?.some(item=>item.status==='continued'));
+    const {questionCalls,questionReceipts:_oldReceipts,...earlier}=run.observation;
+    const [origin]=questionCalls;
+    assert.ok(run.cursor>origin.callSeq);
+    await host.plugin.dispose();
+    const older=new LoomStore(join(host.loomDirectory,'loom.sqlite'));
+    try {older.updateRun(run.id,{observation:earlier});} finally {older.close();}
+    await host.root.plugin(loom,{directory:host.loomDirectory,intervalMs:20}).await();
+    release.resolve();
+    assert.equal((await host.settled(work.id)).work.status,'review');
+    const {items,total}=await host.runs(work.id);
+    assert.equal(total,1);
+    assert.equal(items[0].id,run.id);
+    const [receipt]=items[0].observation.questionReceipts??[];
+    assert.ok(receipt,'Loom did not recover the consumed timed call');
+    const {asOfSeq,...evidence}=receipt;
+    assert.deepEqual(evidence,{...origin,status:'continued'});
+    assert.ok(asOfSeq>=run.cursor && asOfSeq<=items[0].cursor);
+  } finally {release.resolve();await host.close();}
+});
+
+test('a newer projection cannot bind same-ID questions from history, another step or another turn',{skip:!installed,timeout:30000},async()=>{
+  const fromHistory='reuse-from-history',fromStep='reuse-in-own-step',fromTurn='reuse-in-foreign-turn',exact='unaffected-question';
+  const firstCut=Promise.withResolvers(),releaseRead=Promise.withResolvers(),ownFinal=Promise.withResolvers(),releaseFinal=Promise.withResolvers();
+  let owningStep=0,foreignStep=0,historyStep=0;
+  const ask=(res,...ids)=>stream(res,{tool_calls:ids.map((id,index)=>({...questionCall(id,id,`Question for ${id}`),index}))},'tool_calls');
+  const host=await fixture(async(wire,_req,res)=>{
+    if(acceptance(wire)) return stream(res,{content:verdict()});
+    const input=wireText(wire.messages.findLast(m=>m.role==='user' && !wireText(m).startsWith('<system-reminder>')));
+    if(input==='Prepare unrelated history') {
+      if(++historyStep===1) return ask(res,'history-only',fromHistory);
+      return stream(res,{content:'History ready.'});
+    }
+    if(input==='Unrelated follow-up') {
+      if(++foreignStep===1) return ask(res,'foreign-only',fromTurn);
+      return stream(res,{content:'Follow-up ready.'});
+    }
+    if(++owningStep===1) return ask(res,fromHistory,fromStep,fromTurn);
+    if(owningStep===2) return ask(res,fromStep,exact);
+    ownFinal.resolve();await releaseFinal.promise;stream(res,{content:'Owning turn complete.'});
+  },timedQuestions);
+  const controller=host.ctx.sessionController,{events}=controller,signal=AbortSignal.timeout(20000);
+  try {
+    const {sessionId}=await controller.create({workspaceId:host.workspace.id});
+    const address={sessionId},agent=host.ctx.agents.get(sessionId);
+    assert.equal((await controller.prompt({...address,requestId:'unrelated-history',content:[{type:'text',text:'Prepare unrelated history'}]},signal)).accepted,true);
+    await deadline(agent.whenIdle(),'unrelated timed questions completed');
+    const {cursor:historyCut}=await controller.state(address,signal);
+    controller.events=async(request,signal)=>{
+      const page=await events.call(controller,request,signal);
+      if(request.address.sessionId===sessionId && page.records.some(({event})=>event.seq>historyCut && event.type==='tool/call' && event.data.name==='ask_user_question')) {
+        firstCut.resolve(page.cursor);await releaseRead.promise;
+      }
+      return page;
+    };
+    const work=await host.create(host.workspace.id,'同一会话内核对原生问题归属',{sessionId,outputs:[]},false);
+    const cut=await deadline(firstCut.promise,'Loom captured an owned question event');
+    await deadline(ownFinal.promise,'owned turn reached its final step',8000);
+    assert.equal((await controller.prompt({...address,requestId:'unrelated-followup',mode:'queue',content:[{type:'text',text:'Unrelated follow-up'}]},signal)).accepted,true);
+    releaseFinal.resolve();
+    await deadline(agent.whenIdle(),'foreign turn reused the same call ID');
+    const snapshot=await controller.projections(address,signal);
+    assert.ok(snapshot.asOfSeq>cut);
+    assert.deepEqual(snapshot.values.userQuestions.active.map(item=>item.callId).sort(),[exact,fromHistory,fromStep,fromTurn,'foreign-only','history-only'].sort());
+    const log=agent.session.snapshotEvents();
+    for(const id of [fromHistory,fromStep,fromTurn]) {
+      const invocations=log.filter(e=>e.type==='tool/call' && e.data.callId===id).map(e=>[e.data.turn,e.data.step]);
+      assert.equal(invocations.length,2);
+      assert.notDeepEqual(...invocations);
+    }
+    releaseRead.resolve();
+    assert.equal((await host.settled(work.id)).work.status,'review');
+    const {items,total}=await host.runs(work.id);
+    assert.equal(total,1);
+    const [run]=items,origin=questionOrigin(log,run,exact);
+    assert.equal(run.sessionId,sessionId);
+    assert.deepEqual(run.observation.questionReceipts,[{...origin,status:'continued',asOfSeq:snapshot.asOfSeq}]);
+  } finally {controller.events=events;releaseFinal.resolve();releaseRead.resolve();await host.close();}
+});
+
 test('HTTP 503 retries only pre-acceptance of the same result and leaves normal auto-acceptance live',{skip:!installed,timeout:30000},async()=>{
   let reviews=0,executions=0;
   const host=await fixture((wire,_req,res)=>{

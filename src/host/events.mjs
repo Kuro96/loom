@@ -30,11 +30,73 @@ function foldJobEvent(run,result,event) {
   }
 }
 
+// The native view carries only callId. Direct calls, PTC subcalls and tool results
+// can share that key; check their locators before attributing a row to a Run.
+export function questionEventCallId({type,data}) {
+  switch(type) {
+    case 'tool/call': return data.callId;
+    case 'tool/ptc-dispatch': return data.subCallId;
+    case 'tool/result': return data.message.toolCallId;
+    case 'user/message': return data.source.kind==='user-question-reply'?data.source.callId:undefined;
+  }
+}
+
+export function questionUpdates(observation,view) {
+  const states=new Map(view.settled.map(({callId})=>[callId,'settled']));
+  for(const {callId,state} of view.active) states.set(callId,state);
+  return observation.questionCalls.flatMap(call=>{
+    const status=states.get(call.callId);
+    const previous=observation.questionReceipts?.find(receipt=>receipt.callSeq===call.callSeq);
+    return status===undefined || previous?.status===status?[]:[{...call,status}];
+  });
+}
+
+export function applyQuestionUpdates(observation,updates,records,asOfSeq) {
+  const byId=new Map(),replyTurns=new Map();
+  let turn=null;
+  for(const {event} of records) {
+    if(event.type==='turn/start') {turn=event.data.turn;continue;}
+    if(event.type==='turn/end') {turn=null;continue;}
+    if(event.type==='user/message') replyTurns.set(event.seq,turn);
+    const id=questionEventCallId(event);
+    if(!byId.has(id)) byId.set(id,[]);
+    byId.get(id).push(event);
+  }
+  const receipts=new Map((observation.questionReceipts??[]).map(receipt=>[receipt.callSeq,receipt])),ambiguous=new Set();
+  for(const call of updates) {
+    const events=byId.get(call.callId)??[];
+    const origins=events.filter(event=>event.type==='tool/call' || event.type==='tool/ptc-dispatch');
+    const results=events.filter(event=>event.type==='tool/result');
+    if(origins.length>1 || results.length>1 || results.some(({seq,data})=>seq<=call.callSeq || data.turn!==call.turn || data.step!==call.step)) {
+      // Appending events cannot resolve a reused key. Keep any earlier receipt at its original cut.
+      ambiguous.add(call.callId);
+      continue;
+    }
+    if(origins[0]?.seq!==call.callSeq || origins[0].type!=='tool/call') continue;
+    const receipt={...call,asOfSeq};
+    if(call.status==='settled') {
+      const [result]=results;
+      if(result===undefined) continue;
+      const reply=events.find(event=>event.type==='user/message' && event.seq>result.seq && event.data.source.outcome==='answered');
+      if(reply) {
+        const turn=replyTurns.get(reply.seq);
+        if(turn===null) continue;
+        receipt.reply={kind:'user-question-reply',seq:reply.seq,turn,messageId:reply.data.id,outcome:reply.data.source.outcome};
+      } else receipt.resultSeq=result.seq;
+    }
+    receipts.set(call.callSeq,receipt);
+  }
+  return {...observation,
+    ...(ambiguous.size?{questionCalls:observation.questionCalls.filter(call=>!ambiguous.has(call.callId))}:{}),
+    ...(receipts.size?{questionReceipts:[...receipts.values()].sort((a,b)=>a.callSeq-b.callSeq)}:{})};
+}
+
 /** Fold chronological native events into one delivery's observation. */
 export function foldRunEvents(run,records) {
   const previous=run.observation ?? {lastTurn:null,ownedTurn:null,admitted:false,summary:'',completion:null};
   const result={...previous,cursor:run.cursor,reportReceipts:[...(previous.reportReceipts??[])],
-    openJobCalls:[...(previous.openJobCalls??[])],pendingJobs:[...(previous.pendingJobs??[])],jobReceipts:[...(previous.jobReceipts??[])]};
+    openJobCalls:[...(previous.openJobCalls??[])],pendingJobs:[...(previous.pendingJobs??[])],jobReceipts:[...(previous.jobReceipts??[])],
+    questionCalls:[...(previous.questionCalls??[])]};
   for(const {event} of records) {
     if(event.seq<=result.cursor) continue;
     result.cursor=event.seq;
@@ -44,6 +106,11 @@ export function foldRunEvents(run,records) {
       result.ownedTurn=result.lastTurn;
     }
     foldJobEvent(run,result,event);
+    if(event.type==='tool/call' && event.data.name==='ask_user_question' && result.admitted && result.completion===null &&
+      event.data.turn===result.ownedTurn && result.ownedTurn===result.lastTurn && Number.isSafeInteger(event.data.step)) {
+      const {turn,step,callId}=event.data;
+      result.questionCalls.push({sessionId:run.sessionId,requestId:run.requestId,turn,step,callId,callSeq:event.seq});
+    }
     if(event.type==='assistant/message' && result.admitted && event.data.turn===result.ownedTurn) {
       result.summary=event.data.message.content.filter(block=>block.type==='text').map(block=>block.text).join('\n').slice(-16000);
     }
