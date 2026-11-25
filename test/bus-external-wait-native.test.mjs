@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
-import { installed } from './context-native-helper.mjs';
+import { installed, native } from './context-native-helper.mjs';
 import { deadline, startupHost, wireText } from './host-native-helper.mjs';
 import * as bootstrap from '../src/bootstrap.mjs';
 import * as loom from '../src/index.mjs';
@@ -16,19 +16,26 @@ function reply(res, delta, reason='stop') {
 }
 const tool=(res,id,name,args)=>reply(res,{tool_calls:[{index:0,id,type:'function',function:{name,arguments:JSON.stringify(args)}}]},'tool_calls');
 
-for (const scenario of ['related','original','retry','missing']) test(`external wait coordination: ${scenario}`, {skip:!installed,timeout:30000}, async t => {
+for (const scenario of ['related','original','retry','missing','help']) test(`external wait coordination: ${scenario}`, {skip:!installed,timeout:30000}, async t => {
   const found=scenario!=='missing';
-  const phrase='receipt-R17', clue='receipt-R17 moved to project ledger Bin-B9', foreign='receipt-R17 unrelated project ledger Bin-X7';
+  const help=scenario==='help';
+  const phrase=help?'dataset manifest':'receipt-R17', clue=help?'dataset manifest verified in project ledger Bin-B9':'receipt-R17 moved to project ledger Bin-B9', foreign=`${phrase} unrelated project ledger Bin-X7`;
   let work, firstWorker, clueSession, otherSession, otherWork, searchReply, busInput, unexpectedCommand, crossProject, allWorks, rejected=false;
   const pages=[];
   if(scenario==='retry') t.mock.timers.enable({apis:['Date'],now:Date.now()});
   const worker=Promise.withResolvers();
-  const host=await startupHost((wire,_req,res)=>{
+  const mainEntered=Promise.withResolvers(), releaseMain=Promise.withResolvers();
+  const host=await startupHost(async(wire,_req,res)=>{
     const message=wire.messages.at(-1), text=wireText(message);
     const names=wire.tools?.map(item=>item.function.name) ?? [];
+    if(wire.messages.some(item=>wireText(item)==='Hold the visible coordinator')) {
+      mainEntered.resolve();await releaseMain.promise;
+      return reply(res,{content:'Visible coordinator finished.'});
+    }
     if(names.includes('loom_report')) {
       if(!firstWorker) {
         firstWorker=wire;
+        if(help) return tool(res,'initial-help','loom_report',{report:{kind:'help',summary:'Dataset version needed',document:{english:'Dataset version needed.',chinese:'缺少数据集版本。'},help:{missingInformation:'Which dataset manifest is current?',attempted:'Checked the input list',expectedEvidence:'A version and its ledger entry'}}});
         return tool(res,'initial-uncertain','loom_report',{report:{kind:'uncertain',summary:'Original receipt location missing',document:{english:'The original location is obsolete.',chinese:'原位置停用。'},uncertainty:{operationId:work.id,remoteRef:phrase,reason:'Original location is obsolete',attempted:'Checked the original work conversation',missingInformation:'Where is the active receipt ledger?'}}});
       }
       worker.resolve(wire);
@@ -37,7 +44,7 @@ for (const scenario of ['related','original','retry','missing']) test(`external 
     if(wireText(wire.messages[0]).startsWith('Loom context review.')) return reply(res,{content:JSON.stringify({summary:'Receipt coordination in progress.',constraints:[],unresolved:[],references:[]})});
     if(!names.includes('loom_command')) return reply(res,{content:'Recorded.'});
     if(message.role!=='tool') {
-      busInput=text;
+      busInput=wire.messages.map(wireText).find(content=>/^\[Loom (?:help|external-wait) reminder\]/.test(content));
       return tool(res,'unrelated-command','loom_command',{request:JSON.stringify({type:'work.create',workspaceId:work.workspaceId,title:'Unrelated fixture work'})});
     }
     if(message.tool_call_id==='unrelated-command') {
@@ -78,7 +85,7 @@ for (const scenario of ['related','original','retry','missing']) test(`external 
       }
       const workspaceId=host.workspace.id;
       const {sessionId:busId}=await rpc('ensureBus');
-      if(scenario==='retry') host.ctx.agents.get(busId).ctx.on('agent/pre-step',(step,next)=>{
+      if(scenario==='retry') host.ctx.on('agent/pre-step',(step,next)=>{
         if(!rejected && step.messages.some(message=>message.source.kind==='loom-external-wait')) {
           rejected=true; t.mock.timers.setTime(Date.now()+61000);
           return {kind:'reject'};
@@ -108,6 +115,11 @@ for (const scenario of ['related','original','retry','missing']) test(`external 
         fixtures.claimExternalWait(otherWork.id,fixtures.getWork(otherWork.id).version,due);
       } finally {fixtures.close();}
       if(found) clueSession=await note(workspaceId,clue,...(scenario==='related'?Array.from({length:6},(_,i)=>`${phrase} any update? ${i}`):[]));
+      if(help) {
+        const {createUserMessage}=native('dsh-llm');
+        host.ctx.agents.get(busId).followup(createUserMessage({source:{kind:'user'},content:[{type:'text',text:'Hold the visible coordinator'}]}));
+        await deadline(mainEntered.promise,'visible coordinator reached provider');
+      }
       work=await rpc('command',{type:'work.create',workspaceId,title:'Check the original shipment receipt',inputs:{checksum:{kind:'value',value:'sample-17'}},...(scenario==='original'?{sessionId:clueSession}:{})});
       work=await rpc('command',{type:'work.confirm',workId:work.id,expectedVersion:work.version});
       const fetchWork=async()=>(await rpc('query',{kind:'work',workId:work.id})).items[0];
@@ -121,7 +133,22 @@ for (const scenario of ['related','original','retry','missing']) test(`external 
         assert.equal(runs[1].sessionId,runs[0].sessionId);
         assert.equal(runs[1].operationId,runs[0].operationId);
         assert.equal(runs[1].inputs.checksum,runs[0].inputs.checksum);
-        assert.equal(runs[1].wait.handoff.actor.sessionId,busId);
+        const coordinatorId=runs[1].wait.handoff.actor.sessionId;
+        assert.notEqual(coordinatorId,busId);
+        assert.ok(host.workspace.sessionIds.includes(coordinatorId));
+        if(help) {
+          assert.notEqual(host.ctx.agents.get(busId).status,'idle');
+          assert.equal(runs[1].wait.kind,'help');
+          assert.equal(runs[1].wait.help.expectedEvidence,'A version and its ledger entry');
+          assert.equal(runs[1].wait.source.callId,'initial-help');
+          assert.equal(Object.hasOwn(runs[1].wait,'remoteRef'),false);
+          const local=await rpc('nativeSessions',{workspaceId});
+          const global=await rpc('nativeSessions');
+          assert.ok(local.items.some(({sessionId})=>sessionId===clueSession));
+          assert.ok(local.items.every(({sessionId})=>sessionId!==coordinatorId));
+          assert.ok(global.every(({sessionId})=>sessionId!==coordinatorId));
+          await assert.rejects(rpc('command',{type:'work.create',workspaceId,sessionId:coordinatorId,title:'Invalid work association'}),/协调会话不能关联为执行会话/);
+        }
       } else {
         const paused=await until(value=>value.status==='paused');
         assert.equal(paused.wait.missingInformation,'Which ledger now contains the R17 receipt?');
@@ -153,5 +180,5 @@ for (const scenario of ['related','original','retry','missing']) test(`external 
       const {result}=await (await route.fetch(new Request(`http://localhost/api/${method}`,{method:'POST',body:JSON.stringify({type:'client-request',rpcId:method,method,payload:unauthenticated})}),peer)).json();
       assert.equal(result.error.code,'FORBIDDEN');
     } finally {await peer.dispose();}
-  } finally {await host.close();}
+  } finally {releaseMain.resolve();await host.close();}
 });

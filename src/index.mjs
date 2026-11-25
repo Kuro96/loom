@@ -6,6 +6,7 @@ import {createWorkerBinder} from './host/worker.mjs';
 import {previewTarget} from './host/report-preview.mjs';
 import {draftFromManual, generateManualDraft} from './host/manual-workflow.mjs';
 import { createLoomContext } from './context/index.mjs';
+import {contextError} from './context/budget.mjs';
 import {loomDirectory} from './bootstrap.mjs';
 
 export const name='loom';
@@ -39,6 +40,7 @@ async function initialize(ctx,config,bindingReady,directory,controlPath) {
   const worker=createWorkerBinder(store);
   ctx.effect(()=>()=>worker.dispose(),'loom: worker binding');
   let engine;
+  const getWork=workId=>store.getWork(workId);
   const context=await createLoomContext(ctx,{
     directory:join(directory,'context'),workspaceId:workspace.workspaceId,
     getSettings:()=>store.getSettings(),query:request=>store.query(request),
@@ -46,12 +48,18 @@ async function initialize(ctx,config,bindingReady,directory,controlPath) {
     command:(request,actor)=>engine.command(request,{kind:'agent',...(actor?.sessionId?{sessionId:actor.sessionId}:{})}),
     modelCatalog:()=>ctx.sessionController.modelCatalog(),
     resolveBus:id=>ctx.sessionController.resolveAgent(id),
+    projectCoordination:{getWork,executeDecision(request,actor,scope){
+      if(request.type!=='work.resolveWait' || request.workId!==scope.workId) throw contextError('FORBIDDEN','自动复查只能处理当前外部操作');
+      const work=getWork(scope.workId);
+      if(work===null || work.workspaceId!==scope.workspaceId || request.expectedVersion!==scope.expectedVersion || work.version!==scope.expectedVersion) throw contextError('CONFLICT','协调记录已变化');
+      return store.command(request,actor,{coordinatorSessionId:actor.sessionId});
+    }},
   });
   ctx.effect(()=>()=>context.dispose(),'loom: context');
   engine=new LoomEngine(ctx,store,context,{intervalMs:config.intervalMs ?? 2000,bindWorker:worker.bindAgent});
   bindingReady.resolve({async bindAgent(agent){await context.bindAgent(agent);await worker.bindAgent(agent);}});
   await context.bindCurrent();
-  for(const agent of ctx.agents.list()) await worker.bindAgent(agent);
+  for(const agent of ctx.agents.list()) {await context.bindAgent(agent);await worker.bindAgent(agent);}
   engine.start();
   ctx.effect(()=>()=>engine.dispose(),'loom: dispatcher');
 

@@ -1,5 +1,6 @@
 import { foldRunEvents } from './events.mjs';
 import { applyPermissionPreset } from '../permissions.mjs';
+import { isProjectCoordinatorSessionId } from '../context/project-coordinator.mjs';
 
 const retryableIO=new Set(['ETIMEDOUT','EAGAIN','EBUSY','ECONNRESET','ECONNREFUSED','EPIPE']);
 const retryableSession=new Set(['session/not-found','session/writer-held','session/agent-busy','session/workspace-attach-failed']);
@@ -70,6 +71,7 @@ export class NativeHarness {
   }
 
   async validateAssociation(workspaceId,sessionId) {
+    if(isProjectCoordinatorSessionId(sessionId)) throw Object.assign(new Error('协调会话不能关联为执行会话'),{code:'INVALID_INPUT'});
     const workspace=this.ctx.workspaceRegistry.get(workspaceId);
     if(workspace===undefined) throw new Error('指定工作区已不存在');
     if(!workspace.getSessionHeaders().some(header=>header.id===sessionId && header.origin!=='subagent')) throw new Error('执行会话必须属于所选工作区');
@@ -140,7 +142,7 @@ export class NativeHarness {
     const controller=this.ctx.sessionController;
     for(const {id:sessionId,origin} of workspace.getSessionHeaders()) {
       signal.throwIfAborted();
-      if(origin==='subagent') continue;
+      if(origin==='subagent' || isProjectCoordinatorSessionId(sessionId)) continue;
       const address={sessionId};
       try {
         const state=await controller.state(address,signal);
@@ -177,6 +179,6 @@ export class NativeHarness {
     }
     const workspaceBySession=new Map();
     for(const workspace of this.ctx.workspaceRegistry.list()) for(const id of workspace.sessionIds) workspaceBySession.set(id,workspace.id);
-    return value.items.filter(row=>row.origin!=='subagent').map(row=>({sessionId:row.sessionId,title:row.projections?.values.title ?? row.sessionId,workspaceId:workspaceBySession.get(row.sessionId) ?? null,running:row.running}));
+    return value.items.filter(row=>row.origin!=='subagent' && !isProjectCoordinatorSessionId(row.sessionId)).map(row=>({sessionId:row.sessionId,title:row.projections?.values.title ?? row.sessionId,workspaceId:workspaceBySession.get(row.sessionId) ?? null,running:row.running}));
   }
 }

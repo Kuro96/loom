@@ -91,9 +91,8 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
   async function bind(agent,workspace,gate) {
     lifetime.throwIfAborted();
     const {id,session}=agent;
-    const identity={instanceId,workspaceId:workspace.id};
     assertMembership(workspace,id);
-    if(!sameHeader(session.header,id,workspace) || session.inheritedEventCount!==0 || !hasOrigin(session,identity)) throw identityError(id);
+    assertOrigin(session,workspace,id);
     const existing=bound.get(agent);
     if(existing!==undefined) {
       await existing.plugin.await();
@@ -192,6 +191,11 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
     return entry;
   }
 
+  function assertOrigin(session,workspace,id) {
+    const identity={instanceId,workspaceId:workspace.id};
+    if(!sameHeader(session.header,id,workspace) || session.inheritedEventCount!==0 || !hasOrigin(session,identity)) throw identityError(id);
+  }
+
   async function ensure(workspace,agentOptions) {
     const sessionId=projectCoordinatorSessionId(instanceId,workspace.id);
     assertMembership(workspace,sessionId,false);
@@ -200,17 +204,21 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
     const stored=await persistence.stat(sessionId,{signal:lifetime});
     lifetime.throwIfAborted();
     if(stored!==undefined) {
-      assertMembership(workspace,sessionId);
       if(!sameHeader(stored.header,sessionId,workspace)) throw identityError(sessionId);
     } else if(workspace.sessionIds.includes(sessionId)) throw identityError(sessionId);
     const setup=async(_agentCtx,agent)=>{
       const gate=reserve(agent);
       if(stored===undefined) {
-        assertMembership(workspace,sessionId,false);
         appendPluginRecord(agent.session,ORIGIN,{instanceId,workspaceId:workspace.id});
-        await workspace.attachSession(sessionId);
         const titles=ctx.get('sessionTitle');
         if(titles!==undefined) titles.rename(agent.session,'Loom 项目协调');
+        if(!await ctx.get('sessions').flush(agent.session)) throw contextError('LOOM_PERSISTENCE_REQUIRED','项目协调会话需要持久化');
+      }
+      if(!workspace.sessionIds.includes(sessionId)) {
+        lifetime.throwIfAborted();
+        assertMembership(workspace,sessionId,false);
+        assertOrigin(agent.session,workspace,sessionId);
+        await workspace.attachSession(sessionId);
       }
       await bind(agent,workspace,gate);
     };
@@ -241,14 +249,17 @@ export function createProjectCoordinator(ctx,{instanceId,role,query,getWork,sear
         if(work===null) return;
         const scope=Object.freeze({workId:work.id,workspaceId,expectedVersion:work.version});
         if(work.workspaceId!==workspaceId || !work.wait?.operationId) throw identityError(agent.id);
-        const {kind,help,remoteRef,operationId}=work.wait;
+        const {kind,help,remoteRef,operationId,supplements=[]}=work.wait;
         const active={scope,operationId,sessionId:work.sessionId,selection,turn:null,admitted:false,decided:false,calls:new Map()};
         if(!sameWork(getWork(work.id),active)) throw contextError('CONFLICT','外部等待版本已变化');
+        const latest=supplements.slice(-4);
+        const preview=latest.map(value=>Array.from(value).slice(0,512).join(''));
+        const answerPreview=supplements.length?{supplements:preview,supplementsTruncated:!isDeepStrictEqual(preview,supplements)}:{};
         const payload={...scope,operationId,...(typeof remoteRef==='string'?{remoteRef:remoteRef.slice(0,512)}:{}),
-          ...(kind==='help'?{help}:{}),sessionId:work.sessionId};
+          ...(kind==='help'?{help}:{}),...answerPreview,sessionId:work.sessionId};
         const label=kind==='help'?'help':'external-wait';
         active.message=createUserMessage({source:{kind:'loom-external-wait',...scope},content:[{type:'text',
-          text:`[Loom ${label} reminder]\n${JSON.stringify(payload)}\n核对本项目相关线索，并以 work.resolveWait 提交协调结果。`}]});
+          text:`[Loom ${label} reminder]\n${JSON.stringify(payload)}\n核对本项目相关线索，并以 work.resolveWait 提交协调结果。${answerPreview.supplementsTruncated?' 用户补充的完整内容见此工作 wait.supplements。':''}`}]});
         entry.active=active;
         agent.followup(active.message);
       });

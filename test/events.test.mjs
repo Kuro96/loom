@@ -8,7 +8,7 @@ test('report receipts retain exact owned turn and call identity across increment
   const session=Session.create(SessionId('report-pages'));
   const records=[];
   const append=(type,data,options)=>records.push({event:session.append(type,data,options)});
-  const report=(callId,turn=2)=>({report:{kind:'result',summary:callId,outputs:{}},source:{sessionId:session.id,requestId:'request',turn,callId}});
+  const report=(callId,turn=2)=>({report:{kind:'result',summary:callId,outputs:{}},source:{sessionId:session.id,requestId:'request',turn,step:1,callId}});
   let run={sessionId:session.id,requestId:'request',cursor:-1,reports:[report('denied'),report('valid'),report('foreign',1)]};
   append('turn/start',{turn:2});
   append('user/message',createUserMessage({source:{kind:'user',rpcId:'request'},content:[]}),{surfaceOp:'append'});

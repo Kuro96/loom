@@ -170,11 +170,12 @@ export class LoomStore {
         ...resolved,useId:work.useId,operationId:work.id,wait:work.wait,reportFormat:'bilingual-v1',reports:[],outputs:{},resultVersion:null,
         status:'dispatching',cursor:-1,createdAt:now()};
       run.prompt+=`\n本次输入：${JSON.stringify(resolved.inputs)}\n消费结果版本：${JSON.stringify(resolved.consumedResults)}\n稳定操作标识operationId：${work.id}\n输出声明：${JSON.stringify(work.outputs)}`;
-      run.prompt+='\n使用loom_report提交具名结果（kind=result）、外部等待（kind=wait）或回执不确定（kind=uncertain）。报告为候选，检查和验收由Host完成。';
+      run.prompt+='\n使用loom_report提交具名结果（kind=result）、外部等待（kind=wait）、回执不确定（kind=uncertain）或求助（kind=help）。报告为候选，检查和验收由Host完成。';
       run.prompt+='\n请在同一次 loom_report 中提交你实际撰写的 document:{english,chinese} Markdown 正文，summary 保留简短摘要。优先使用可用且适用的报告技能。先用简短英文写明结论、证据、未决事项或所需决定，术语一致；再忠实翻译为自然中文，保留数字、条件和不确定性。';
       run.prompt+='\n完成工作即使没有文件或声明输出也须提交双语正文。outputs 保存声明的交接值，无声明时为 {}。deliverables:[{title,path}] 仅列本次实际直接交给用户的文件，path 使用项目内相对路径；无交付文件时省略或填 []。';
-      run.prompt+='\n外部等待请记录原操作引用、完成条件及下次核对时间。缺少线索时，在报告中注明已查来源和缺口，交给总控查找相关项目记录。';
-      if(work.wait) run.prompt+=`\n恢复操作须先核原操作状态，继续同一operationId；总控交接和用户补充是核对线索，不是变更范围或重复提交的授权。\n现有外部操作记录：${JSON.stringify(work.wait)}`;
+      run.prompt+='\n外部等待请记录原操作引用、完成条件及下次核对时间。缺少关键事实时，用 help 说明缺口、已查来源和所需证据。';
+      if(work.wait?.remoteRef) run.prompt+=`\n恢复操作须先核原操作状态，继续同一operationId；总控交接和用户补充是核对线索，不是变更范围或重复提交的授权。\n现有外部操作记录：${JSON.stringify(work.wait)}`;
+      else if(work.wait?.kind==='help') run.prompt+=`\n按当前工作范围查证并继续。\n求助与交接记录：${JSON.stringify(work.wait)}`;
       this.#put('run',run); this.#event('run.reserved',run,{kind:'host'},{runId:run.id,requestId:run.requestId});
       return run;
     });
@@ -323,9 +324,10 @@ export class LoomStore {
   }
   reportRun(runId,report,source) {
     bounded(report);bounded(source);
-    requireValue(source && Object.keys(source).every(k=>['sessionId','requestId','turn','callId'].includes(k)),'报告来源格式错误');
+    requireValue(source && Object.keys(source).every(k=>['sessionId','requestId','turn','step','callId'].includes(k)),'报告来源格式错误');
     text(source.sessionId,'会话ID');text(source.requestId,'请求ID');text(source.callId,'工具调用ID');
     requireValue(Number.isSafeInteger(source.turn) && source.turn>=0,'报告轮次须为非负整数');
+    if(source.step!==undefined) requireValue(Number.isSafeInteger(source.step) && source.step>=0,'报告步骤须为非负整数');
     return this.#transaction(()=>{
       const run=this.#required('run',runId);
       requireValue(source.sessionId===run.sessionId && source.requestId===run.requestId,'报告执行身份不符','FORBIDDEN');
@@ -345,13 +347,21 @@ export class LoomStore {
       if(run.settleHash) {requireValue(run.settleHash===hash,'报告已有不同收口','CONFLICT');return run;}
       requireValue(['dispatching','accepted','running'].includes(run.status),'当前运行须先完成停止对账','INVALID_STATE');
       const candidate=run.reports.find(c=>c.source.callId===callId);
-      requireValue(candidate && ['wait','uncertain'].includes(candidate.report.kind),'须选择等待或不确定报告');
+      requireValue(candidate && ['wait','uncertain','help'].includes(candidate.report.kind),'须选择等待、不确定或求助报告');
       const report=candidate.report,work=this.#required('work',run.workId);
       if(report.document) this.#appendDocument(work,run.id,'worker','执行报告',report.document);
+      const previous=work.wait;
+      const supplements=[...new Set([previous?.originalOperation?.information,...(previous?.supplements??[]),previous?.information].filter(value=>value!==undefined))];
       const followUp=report.kind==='uncertain'?report.uncertainty.followUp:undefined;
       const scheduled=report.kind==='wait' || followUp!==undefined;
-      run.status=scheduled?'waiting':'uncertain';work.status=scheduled || coordinate?'waiting':'paused';
-      if(followUp) {
+      run.status=scheduled || report.kind==='help'?'waiting':'uncertain';work.status=scheduled || coordinate?'waiting':'paused';
+      if(report.kind==='help') {
+        const source={...candidate.source,runId,eventCursor};
+        const originalOperation=previous?.kind==='help'?previous.originalOperation:previous?.remoteRef?previous:undefined;
+        const original=originalOperation===undefined?{}:{remoteRef:originalOperation.remoteRef,originalOperation};
+        work.wait={kind:'help',operationId:work.id,...original,help:report.help,source,
+          ...(coordinate?{nextCheckAt:now()}:{missingInformation:report.help.missingInformation})};
+      } else if(followUp) {
         const {operationId,remoteRef,reason}=report.uncertainty;
         work.wait={operationId,remoteRef,condition:reason,...followUp};
       } else if(coordinate && !scheduled) {
@@ -359,22 +369,25 @@ export class LoomStore {
         work.wait={...reference,nextCheckAt:now(),...(missingInformation?{pendingInformation:missingInformation}:{})};
       }
       else work.wait=report.kind==='wait'?report.wait:report.uncertainty;
+      if(supplements.length) work.wait={...work.wait,supplements};
       run.wait=work.wait;
       run.summary=report.summary;run.reportCallId=callId;run.cursor=Math.max(run.cursor,eventCursor);run.finishedAt=now();run.settleHash=hash;
-      this.#saveWork(work);this.#put('run',run);this.#event('run.reportSettled',run,{kind:'host'},{callId,eventCursor,status:run.status});return run;
+      this.#saveWork(work);this.#put('run',run);this.#event('run.reportSettled',run,{kind:'host'},{callId,eventCursor,status:run.status,kind:report.kind});return run;
     });
   }
-  nextExternalWait(at=now()) {
+  nextExternalWait(at=now(),workspaceId=null) {
     const row=this.#db.prepare(`SELECT w.body FROM works w JOIN workspaces p ON p.id=w.workspaceId
       WHERE w.status='waiting' AND json_extract(p.body,'$.active')=1
+      AND (CASE WHEN ? IS NULL THEN json_extract(w.body,'$.wait.kind') IS NOT 'help' ELSE w.workspaceId=? END)
       AND julianday(COALESCE(json_extract(w.body,'$.wait.coordination.retryAt'),json_extract(w.body,'$.wait.nextCheckAt')))<=julianday(?)
-      ORDER BY julianday(COALESCE(json_extract(w.body,'$.wait.coordination.retryAt'),json_extract(w.body,'$.wait.nextCheckAt'))),w.seq LIMIT 1`).get(at);
+      ORDER BY julianday(COALESCE(json_extract(w.body,'$.wait.coordination.retryAt'),json_extract(w.body,'$.wait.nextCheckAt'))),w.seq LIMIT 1`).get(workspaceId,workspaceId,at);
     return row===undefined ? null : recordBody('work',row);
   }
   claimExternalWait(workId,version,at=now()) {
     return this.#transaction(()=>{
       const work=this.#get('work',workId);
       if(work===null || work.status!=='waiting' || work.version!==version) return null;
+      if(this.#get('workspace',work.workspaceId)?.active!==true) return null;
       if(zonedTime(work.wait.coordination?.retryAt??work.wait.nextCheckAt)>zonedTime(at)) return null;
       const attempt=(work.wait.coordination?.attempt??0)+1;
       const retryAt=new Date(zonedTime(at)+Math.min(30*60000,60000*2**Math.min(attempt-1,5))).toISOString();
@@ -388,7 +401,7 @@ export class LoomStore {
     const due=zonedTime(at);requireValue(Number.isInteger(limit) && limit>0 && limit<=200,'唤醒条数须为1至200');
     return this.#transaction(()=>{
       const result=[];
-      for(const row of this.#db.prepare("SELECT body FROM works WHERE status='waiting' ORDER BY seq").iterate()) {
+      for(const row of this.#db.prepare("SELECT body FROM works WHERE status='waiting' AND json_extract(body,'$.wait.kind') IS NOT 'help' ORDER BY seq").iterate()) {
         const work=JSON.parse(row.body);
         if(zonedTime(work.wait.nextCheckAt)>due) continue;
         work.status='queued';this.#saveWork(work);this.#event('work.woken',work,{kind:'host'},{wait:work.wait,at});result.push(work);

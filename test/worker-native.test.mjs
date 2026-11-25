@@ -52,8 +52,9 @@ test('原生worker按当前请求提交具名结果并正常结束，工具仅�
   await host.drive([[call('report-one')]]);
   assert.equal(host.state.reports.length,1);
   assert.deepEqual(host.state.reports[0].report,resultReport);
-  assert.deepEqual(host.state.reports[0].source,{sessionId:'worker-one',requestId:'request-one',turn:1,callId:'report-one'});
   const events=host.agent.session.snapshotEvents();
+  const reportCall=events.find(event=>event.type==='tool/call' && event.data.callId==='report-one');
+  assert.deepEqual(host.state.reports[0].source,{sessionId:'worker-one',requestId:'request-one',turn:1,step:reportCall.data.step,callId:'report-one'});
   assert.equal(events.findLast(event=>event.type==='turn/end').data.reason.kind,'completed');
   assert.equal(host.agent.status,'idle');
 });
@@ -97,6 +98,25 @@ test('a blocked native report leaves the review diagnostic and publishes neither
   const work=f.store.getWork(run.workId);
   assert.equal(f.store.getRun(run.id).reports.length,1);assert.equal(work.result.review.passed,false);
   assert.match(work.result.review.summary,/blocked/);assert.deepEqual(work.documents,[]);assert.deepEqual(work.result.deliverables,[]);
+});
+
+test('a successful tool in an earlier step cannot validate a later rejected report with the same call id',{skip:!installed},async t=>{
+  const f=await engineHost(t),run=await f.createRun(),agent=f.handles.get(run.sessionId).agent;
+  const {defineTool}=native('dsh-tools');
+  agent.ctx.tools.register(defineTool({name:'read_version',description:'Read the version',parameters:{},
+    output:{schema:{type:'string'},render:(_args,value)=>[{type:'text',text:value}]},execute:()=> 'V2'}));
+  agent.ctx.on('tools/post-execute',(exec,_result,next)=>exec.callId==='call-0' && f.store.getRun(run.id).reports.length
+    ? {kind:'block',feedback:[{type:'text',text:'Check the source first.'}]} : next());
+  const report={kind:'help',summary:'Version needed',help:{missingInformation:'Which version applies?',attempted:'Read existing version',expectedEvidence:'Release manifest'}};
+  await f.drive(run,[[{id:'call-0',name:'read_version',arguments:{}}],[call('call-0',report)],'Check the release manifest.']);
+  const results=agent.session.snapshotEvents().filter(event=>event.type==='tool/result' && event.data.message.toolCallId==='call-0');
+  assert.deepEqual(results.map(event=>event.data.message.isError),[false,true]);
+  assert.notEqual(results[0].data.step,results[1].data.step);
+  await f.engine.observe(f.store.getRun(run.id));
+  const work=f.store.getWork(run.workId);
+  assert.equal(work.wait,null);
+  assert.equal(work.status,'review');
+  assert.match(work.result.review.summary,/原生工具失败/);
 });
 
 test('a new text-only completion with no handoff or bilingual document stays in review',{skip:!installed},async t=>{

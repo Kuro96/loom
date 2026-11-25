@@ -125,8 +125,9 @@ review 为 `{passed,summary,source,evidence}`。检查结果须含布尔 passed�
 ```js
 report = {kind:'result', summary, outputs:{name:JsonValue}}
        | {kind:'wait', summary, wait:{operationId,remoteRef,condition,nextCheckAt,checkMethod?}}
-       | {kind:'uncertain', summary, uncertainty:{operationId,remoteRef,reason}};
-source = {sessionId,requestId,turn,callId};
+       | {kind:'uncertain', summary, uncertainty:{operationId,remoteRef,reason}}
+       | {kind:'help', summary, help:{missingInformation,attempted,expectedEvidence}};
+source = {sessionId,requestId,turn,step,callId};
 ```
 
 - `getActiveRunForSession(sessionId)` 返回活动 Run 或 null。
@@ -134,7 +135,8 @@ source = {sessionId,requestId,turn,callId};
 - 报告根与嵌套拒绝执行身份及授权字段，如 actor/workId/runId/sessionId/requestId/authorization/modelConsent/checksConsent/permissionPreset/autoAccept。输出须有声明，业务 model 输出作为 JSON 数据保存。
 - operationId 固定为 Work.id，远端引用/条件/原因须为非空文字。nextCheckAt 须是带时区有效日期，在报告时位于未来 30 天以内。
 - `settleReport(runId,{callId,eventCursor,coordinate})`：wait 或带 `uncertainty.followUp:{checkMethod,nextCheckAt}` 的回执定时等待；正式 Host 同时把无复查时间的 uncertain 交给总控立即协调。`attempted` 与 `missingInformation` 成对记录运行者核过的来源及缺口。总控确认确实缺信息后，待补信息使用 `work.resume {workId,expectedVersion,information}` 继续原操作。
-- Host 根据 `nextExternalWait` 选到期工作，使用 `claimExternalWait` 绑定版本并持久保存复查退避时间，再通知总控。`work.resolveWait` 验证当前总控身份、工作版本和操作 ID；可保存交接线索并排回队列、安排下次检查，或登记具体待补信息。下一 Run 采用同一 Work/session/operationId、原 inputs/consumedResults，并携带已查来源及线索。暂停与取消适用原有控制；变更后的工作拒绝迟到的协调结果。
+- `help` 用于缺少关键事实。`wait.source` 记录原 Run、session、工具步骤与轮次结束游标。`wait.originalOperation` 保存最初远端检查条件和用户补充，`wait.supplements` 保存后续补充；续办提示一并携带。
+- 宿主按项目以 `nextExternalWait(at,workspaceId)` 选到期工作，使用 `claimExternalWait` 保留认领版本与复查退避时间，再通知该项目的后台协调会话。`work.resolveWait` 验证协调会话、工作版本和操作 ID；可保存交接线索并排回队列、安排下次检查，或登记具体待补信息。下一 Run 采用同一 Work/session/operationId、原 inputs/consumedResults，并携带已查来源及线索。暂停、取消或改版会使未完成的协调决定过期。
 
 核心保存候选。Host 核同归属 turn 正常结束、对应原生 tool/result 成功、会话 idle 且活动归零，再调用 finishRun/settleReport。Host 负责失败回执诊断、恢复成功事实重建及原生工具终结保护。取消 waiting 结束本地跟踪，保留远端引用供展示及对账。
 

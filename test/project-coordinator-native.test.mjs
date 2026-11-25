@@ -133,6 +133,34 @@ test('reserved native sessions deny ordinary input and inherited native tools be
   }
 });
 
+test('the project’s next coordination prompt carries the previous user answer', {skip:!installed,timeout:30000},async()=>{
+  const host=await startupHost((_wire,_req,res)=>reply(res,{content:'Consult the version map.'}));
+  const store=new LoomStore(join(host.directory,'loom.sqlite'));
+  let coordinator;
+  try {
+    const {createProjectCoordinator}=await import('../src/context/project-coordinator.mjs');
+    const {workspace}=host,actor={kind:'agent',sessionId:'previous-coordinator'};
+    store.syncWorkspaces([{workspaceId:workspace.id,path:workspace.path,title:workspace.title}]);
+    const first=waitingWork(store,workspace.id,'Read the manifest');
+    const claimed=store.claimExternalWait(first.id,first.version,first.wait.nextCheckAt);
+    const asked=store.command({type:'work.resolveWait',workId:first.id,operationId:first.id,expectedVersion:claimed.version,action:'ask',sources:['Release index'],missingInformation:'Which vocabulary?'},actor,{coordinatorSessionId:actor.sessionId});
+    store.command({type:'work.resume',workId:first.id,expectedVersion:asked.version,information:'Vocabulary: partner V3'},{kind:'user'});
+    const run=store.reserveRun(first.id);
+    store.reportRun(run.id,{kind:'help',summary:'Need status map',help:{missingInformation:'Which status applies?',attempted:'Checked release index',expectedEvidence:'Version map'}},
+      {sessionId:run.sessionId,requestId:run.requestId,turn:1,step:1,callId:'help'});
+    store.settleReport(run.id,{callId:'help',eventCursor:5,coordinate:true});
+    const waiting=store.getWork(first.id),bus=new BusState(join(host.directory,'bus'),workspace.id);
+    coordinator=createProjectCoordinator(host.ctx,coordinatorOptions(store,bus));
+    await deadline(coordinator.dispatch(workspace.id,()=>store.claimExternalWait(waiting.id,waiting.version,waiting.wait.nextCheckAt)),'project reads earlier answer');
+    assert.equal(host.received.length,1);
+    const trigger=host.received[0].messages.map(wireText).find(text=>text.startsWith('[Loom help reminder]'));
+    assert.match(trigger,/Vocabulary: partner V3/);
+  } finally {
+    try {if(coordinator) await coordinator.dispose();}
+    finally {store.close();await host.close();}
+  }
+});
+
 test('reopening the persisted coordinator keeps its history and discards a queued replay', {skip:!installed,timeout:30000},async()=>{
   const host=await startupHost((_wire,_req,res)=>reply(res,{content:'Project history survived.'}));
   const store=new LoomStore(join(host.directory,'loom.sqlite'));
@@ -154,8 +182,10 @@ test('reopening the persisted coordinator keeps its history and discards a queue
     assert.equal(host.received.length,1);
     await coordinator.dispose();
     assert.equal(host.ctx.agents.get(id),undefined);
+    await workspace.detachSession(id);
+    assert.equal(workspace.sessionIds.includes(id),false);
 
-    // A cold persisted inbox can contain a trigger from before the interruption.
+    // The origin may survive a restart before membership is committed. An old inbox trigger is still stale.
     const writer=await host.ctx.sessionPersistence.open(id,'write');
     try {
       const {events}=await writer.read(0);

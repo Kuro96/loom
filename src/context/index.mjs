@@ -13,6 +13,7 @@ import { acceptanceValue } from './acceptance.mjs';
 import { applyPermissionPreset } from '../permissions.mjs';
 import { loadWritingGuidance } from '../host/writing-skills.mjs';
 import {bindings,guardAgent} from './binding.mjs';
+import {createProjectCoordinator,isProjectCoordinatorSessionId} from './project-coordinator.mjs';
 const require=createRequire(import.meta.url);
 // Known identities for strict recovery of older logs with a misplaced system head.
 const HISTORICAL_SYSTEM_DIGESTS=new Set([
@@ -54,6 +55,10 @@ export async function createLoomContext(ctx, options) {
   const owned=new Set(); let handle=null, busAgent=null, disposed=false, ensuring=null, disposal=null;
   const bindingOwner={};
   const closing=new AbortController();
+  const projects=options.projectCoordination===undefined ? null : createProjectCoordinator(ctx,{
+    instanceId:state.value.busId,role:()=>role('bus'),query,searchProjectSessions,config,signal:closing.signal,
+    ...options.projectCoordination,
+  });
   const evaluations=new Set();
   const auxiliary=new Map();
   const activeUsage=new Map(), reviews=new WeakMap();
@@ -74,6 +79,7 @@ export async function createLoomContext(ctx, options) {
   });
   const offCreated=ctx.on('agent/created',({agent})=>bindAgent(agent),{prepend:true});
   async function bindAgent(agent) {
+    if(projects!==null && isProjectCoordinatorSessionId(agent.id)) return projects.bindAgent(agent);
     if(agent.id!==state.value.current?.sessionId) return;
     await setup(agent.ctx,agent);
     busAgent=agent;
@@ -205,6 +211,7 @@ export async function createLoomContext(ctx, options) {
       }
       scoped.on('agent/pre-step',(step,next)=>{
         if(disposed || !binding.active) throw contextError('LOOM_BINDING_CLOSED','Loom binding is closed');
+        if(step.messages.some(message=>message.source.kind==='loom-external-wait')) return {kind:'reject'};
 
         const pending=checkpoint ? [checkpoint] : [];
         return policy.preStep({...step,messages:[...pending,...step.messages]},async()=>{
@@ -356,18 +363,7 @@ export async function createLoomContext(ctx, options) {
     }
     return structuredClone(state.value.current);
   }
-  async function dispatchExternalWait(claim) {
-    if(state.value.pending) return;
-    const {sessionId}=await ensureBus();
-    const agent=ctx.agents.get(sessionId);
-    if(agent.status!=='idle' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length || state.value.pending) return;
-    const work=claim();
-    if(work===null) return;
-    const {createUserMessage}=require('@deepseek-ai/dsh-llm');
-    const {operationId,remoteRef}=work.wait;
-    const target={workId:work.id,workspaceId:work.workspaceId,expectedVersion:work.version};
-    agent.followup(createUserMessage({source:{kind:'loom-external-wait',...target},content:[{type:'text',text:`[Loom external-wait reminder]\n${JSON.stringify({...target,operationId,remoteRef:remoteRef.slice(0,512)})}\n核对本项目相关线索，并以 work.resolveWait 提交协调结果。`}]}));
-  }
+
   async function evaluate(work,run,checks,signal) {
     if(disposed) throw contextError('LOOM_DISPOSED','Loom context is disposed');
     const combined=signal ? AbortSignal.any([signal,closing.signal]) : closing.signal;
@@ -402,6 +398,7 @@ export async function createLoomContext(ctx, options) {
       const settle=async operation=>{const [result]=await Promise.allSettled([Promise.resolve().then(operation)]);if(result.status==='rejected')failures.push(result.reason);};
       if(ensuring) await settle(()=>ensuring);
       if(handle) await settle(()=>handle.dispose());
+      if(projects!==null) await settle(()=>projects.dispose());
       await Promise.allSettled([...evaluations]);
       await settle(()=>wire.dispose());
       await settle(()=>Promise.resolve(offStream()));
@@ -418,7 +415,7 @@ export async function createLoomContext(ctx, options) {
   }
   return {
     ensureBus,
-    dispatchExternalWait,
+    ...(projects===null?{}:{dispatchExternalWait:(workspaceId,claim)=>projects.dispatch(workspaceId,claim),stopCoordination:()=>projects.dispose()}),
     bindAgent,bindCurrent,
     getBus:()=>structuredClone(state.value.current),
     getUsage:payload=>usage.query(state.value.busId,payload),

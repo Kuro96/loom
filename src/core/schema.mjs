@@ -150,9 +150,9 @@ export function reportSchema(report,work) {
     for(const [key,nested] of Object.entries(value)) {requireValue(!forbidden.has(key),`报告含身份或授权字段：${key}`);visit(nested);}
   }
   visit(report);
-  requireValue(['result','wait','uncertain'].includes(report.kind),'报告类型错误');
+  requireValue(['result','wait','uncertain','help'].includes(report.kind),'报告类型错误');
   requireValue(typeof report.summary==='string','报告摘要须为文字');
-  const payload=report.kind==='result'?'outputs':report.kind==='wait'?'wait':'uncertainty';
+  const payload={result:'outputs',wait:'wait',uncertain:'uncertainty',help:'help'}[report.kind];
   const allowed=['kind','summary','document',payload];
   if(report.kind==='result') allowed.push('deliverables');
   requireValue(Object.keys(report).every(k=>allowed.includes(k)),'报告格式错误');object(report[payload],'报告内容');
@@ -160,6 +160,11 @@ export function reportSchema(report,work) {
   if(report.kind==='result') {
     if(report.deliverables!==undefined) checkDeliverables(report.deliverables);
     for(const name of Object.keys(report.outputs)) requireValue(work.outputs.some(o=>o.name===name),'报告含未声明输出');
+  } else if(report.kind==='help') {
+    const fields=['missingInformation','attempted','expectedEvidence'];
+    requireValue(Object.keys(report.help).every(key=>fields.includes(key)),'求助格式错误');
+    for(const key of fields) text(report.help[key],'求助内容');
+    requireValue(fields.every(key=>Buffer.byteLength(report.help[key])<=1024),'单项求助内容超过1KiB');
   } else {
     const value=report[payload],allowed=report.kind==='wait'?['operationId','remoteRef','condition','nextCheckAt','checkMethod']:['operationId','remoteRef','reason','followUp','attempted','missingInformation'];
     requireValue(Object.keys(value).every(k=>allowed.includes(k)),'外部操作格式错误');

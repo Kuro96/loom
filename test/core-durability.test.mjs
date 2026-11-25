@@ -61,6 +61,36 @@ test('预留提交后进程直接退出，WAL恢复保留run、请求身份及�
   try {assert.equal(sql.prepare('PRAGMA integrity_check').get().integrity_check,'ok');} finally {sql.close();}
 });
 
+test('进程在认领求助后退出，复查按原会话和版本恢复，取消拒绝迟到的结果',async t=>{
+  const {dir,file}=temporary(t),work=prepare(file,dir);
+  const result=await child(`import { LoomStore } from ${JSON.stringify(moduleURL)};
+    const db=new LoomStore(process.argv[1]),run=db.reserveRun(process.argv[2]);
+    db.reportRun(run.id,{kind:'help',summary:'缺少版本',help:{missingInformation:'当前数据集版本？',attempted:'已查发布清单',expectedEvidence:'版本及出处'}},
+      {sessionId:run.sessionId,requestId:run.requestId,turn:1,callId:'help-call'});
+    db.settleReport(run.id,{callId:'help-call',eventCursor:8,coordinate:true});
+    const due=db.nextExternalWait(undefined,run.workspaceId);
+    const claimed=db.claimExternalWait(due.id,due.version);
+    process.stdout.write(JSON.stringify(claimed),()=>process.exit(23));`,[file,work.id]);
+  assert.equal(result.code,23,result.stderr);
+  const first=JSON.parse(result.stdout),store=new LoomStore(file);
+  try {
+    const persisted=store.getWork(work.id);
+    assert.deepEqual(persisted.wait,first.wait);
+    assert.equal(persisted.wait.source.sessionId,persisted.sessionId);
+    assert.equal(store.nextExternalWait(new Date(Date.parse(first.wait.coordination.retryAt)-1).toISOString(),persisted.workspaceId),null);
+    assert.equal(store.nextExternalWait(first.wait.coordination.retryAt,'other-project'),null);
+    const due=store.nextExternalWait(first.wait.coordination.retryAt,persisted.workspaceId);
+    const claimed=store.claimExternalWait(due.id,due.version,first.wait.coordination.retryAt);
+    assert.equal(claimed.wait.coordination.attempt,2);
+    assert.equal(store.claimExternalWait(due.id,due.version,first.wait.coordination.retryAt),null);
+    const coordinator={kind:'agent',sessionId:'coordination-agent'};
+    store.command({type:'work.cancel',workId:work.id,expectedVersion:claimed.version},actor);
+    assert.throws(()=>store.command({type:'work.resolveWait',workId:work.id,expectedVersion:claimed.version,operationId:work.id,action:'continue',sources:['项目记录'],information:'版本 V2'},coordinator,{coordinatorSessionId:coordinator.sessionId}),{code:'CONFLICT'});
+    assert.equal(store.getWork(work.id).status,'cancelled');
+    assert.equal(store.getRun(first.wait.source.runId).wait.source.callId,'help-call');
+  } finally {store.close();}
+});
+
 test('unchanged workspace sync preserves SQLite data_version and project history', t=>{
   const {dir,file}=temporary(t),store=new LoomStore(file), observer=new DatabaseSync(file);
   try {

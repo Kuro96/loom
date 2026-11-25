@@ -63,6 +63,35 @@ function boundary(fn) {
   return {reached:reached.promise,release:release.resolve,call:async(...args)=>{reached.resolve();await release.promise;return fn(...args);}};
 }
 
+test('a project keeps its turn when two earlier projects have a continuous coordination backlog',async t=>{
+  const f=fixture(t),spaces=f.engine.ctx.workspaceRegistry.list();
+  spaces.push({id:'c',path:f.directory,title:'c',sessionIds:[]});
+  const workspaces=f.engine.native.workspaces();
+  f.store.syncWorkspaces(workspaces);
+  for(const {workspaceId} of workspaces) for(let i=0;i<2;i++) {
+    const run=f.reserve(workspaceId);
+    f.store.reportRun(run.id,{kind:'help',summary:'Need a version',help:{missingInformation:'Which version?',attempted:'Read local list',expectedEvidence:'Manifest'}},
+      {sessionId:run.sessionId,requestId:run.requestId,turn:1,step:1,callId:'help'});
+    f.store.settleReport(run.id,{callId:'help',eventCursor:5,coordinate:true});
+  }
+  const order=[],holds=[];
+  f.engine.context.dispatchExternalWait=async(workspaceId,claim)=>{
+    assert.equal(claim().workspaceId,workspaceId);
+    order.push(workspaceId);
+    const hold=Promise.withResolvers();holds.push(hold);await hold.promise;
+  };
+  try {
+    await f.engine.tick();
+    assert.deepEqual(order,['a','b']);
+    const completed=[...f.engine.coordinationActive.values()];
+    for(const hold of holds) hold.resolve();
+    await Promise.all(completed);
+    await f.engine.tick();
+    assert.deepEqual(order,['a','b','c','a']);
+    assert.equal(f.engine.coordinationActive.size,2);
+  } finally {for(const hold of holds) hold.resolve();}
+});
+
 test('pause while preparing prevents a later native prompt',async t=>{
   const f=fixture(t),run=f.reserve();
   const gate=boundary(async()=>({cursor:run.cursor,delivered:false}));

@@ -249,6 +249,48 @@ test('external wait decisions retain their original evidence after another check
     {operationId:work.id,action:'ask',missingInformation:'Which ledger?',sources:['Original receipt']}]);
 });
 
+test('repeated help preserves the original remote operation and each user supplement in the next run',t=>{
+  const {store:s}=fixture(t),work=approve(s,create(s)),run=s.reserveRun(work.id);
+  const report=waitReport(work,{checkMethod:'Read status by original receipt'});
+  s.reportRun(run.id,report,source(run));s.settleReport(run.id,{callId:'report',eventCursor:5,coordinate:true});
+  const due=report.wait.nextCheckAt,claimed=s.claimExternalWait(work.id,s.getWork(work.id).version,due);
+  const command={type:'work.resolveWait',workId:work.id,operationId:work.id};
+  const opts={coordinatorSessionId:agent.sessionId};
+  const asked=s.command({...command,expectedVersion:claimed.version,action:'ask',missingInformation:'Which order shard?',sources:['Receipt ledger']},agent,opts);
+  s.command({type:'work.resume',workId:work.id,expectedVersion:asked.version,information:'Order shard R17'},user);
+  const retry=s.reserveRun(work.id);
+  s.reportRun(retry.id,{kind:'help',summary:'Need status mapping',help:{missingInformation:'Which status is final?',attempted:'Status API',expectedEvidence:'Status definitions'}},source(retry));
+  s.settleReport(retry.id,{callId:'report',eventCursor:9,coordinate:true});
+  const waiting=s.getWork(work.id),help=s.claimExternalWait(work.id,waiting.version,waiting.wait.nextCheckAt);
+  const requested=s.command({...command,expectedVersion:help.version,action:'ask',missingInformation:'Which status vocabulary?',sources:['Status definitions']},agent,opts);
+  s.command({type:'work.resume',workId:work.id,expectedVersion:requested.version,information:'Use partner vocabulary V3'},user);
+  const more=s.reserveRun(work.id);
+  s.reportRun(more.id,{kind:'help',summary:'Need partner mapping',help:{missingInformation:'What does Arrived mean?',attempted:'Partner API',expectedEvidence:'V3 mapping'}},source(more));
+  s.settleReport(more.id,{callId:'report',eventCursor:14,coordinate:true});
+  const again=s.getWork(work.id),second=s.claimExternalWait(work.id,again.version,again.wait.nextCheckAt);
+  s.command({...command,expectedVersion:second.version,action:'continue',sources:['V3 mapping'],information:'Arrived is final'},agent,opts);
+  const resumed=s.reserveRun(work.id);
+  assert.equal(resumed.sessionId,run.sessionId);
+  assert.equal(resumed.wait.originalOperation.remoteRef,report.wait.remoteRef);
+  assert.equal(resumed.wait.originalOperation.condition,report.wait.condition);
+  assert.equal(resumed.wait.originalOperation.checkMethod,report.wait.checkMethod);
+  assert.equal(resumed.wait.originalOperation.information,'Order shard R17');
+  assert.match(resumed.prompt,/Order shard R17/);
+  assert.match(resumed.prompt,/Use partner vocabulary V3/);
+  let continuing=resumed;
+  for(const [kind,report] of [['wait',waitReport(work)],['uncertain',{kind:'uncertain',summary:'Check original receipt',
+    uncertainty:{operationId:work.id,remoteRef:'platform/job-1',reason:'Receipt needs verification'}}]]) {
+    s.reportRun(continuing.id,report,source(continuing));
+    s.settleReport(continuing.id,{callId:'report',eventCursor:18,coordinate:true});
+    const waiting=s.getWork(work.id);
+    assert.deepEqual(waiting.wait.supplements,['Order shard R17','Use partner vocabulary V3'],kind);
+    const claimed=s.claimExternalWait(work.id,waiting.version,waiting.wait.nextCheckAt);
+    s.command({...command,expectedVersion:claimed.version,action:'continue',sources:['Receipt ledger'],information:'Read existing status'},agent,opts);
+    continuing=s.reserveRun(work.id);
+    assert.match(continuing.prompt,/Use partner vocabulary V3/);
+  }
+});
+
 test('rework previews transitive consumers, requires fresh user impact confirmation and preserves history',t=>{
   const f=fixture(t);let s=f.store;
   const a=approve(s,create(s,{outputs:[{name:'data',required:true}]}),true),ar=result(s,a,{data:'v1'});

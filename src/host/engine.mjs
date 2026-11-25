@@ -1,12 +1,13 @@
 import { isUserCleanupCommand } from '../core/schema.mjs';
 import { NativeHarness, NativeRunFailure, sameModel } from './native.mjs';
-import { foldRunEvents } from './events.mjs';
+import { foldRunEvents, sameReportInvocation } from './events.mjs';
 import { runChecks } from './checks.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { isAcceptanceFailure } from '../context/acceptance.mjs';
 import { redact } from '../context/budget.mjs';
 
 const MAX_DELIVERIES=3;
+const MAX_PROJECT_COORDINATORS=2;
 
 /** Persist intent before sending and reconcile native execution before acceptance. */
 export class LoomEngine {
@@ -18,7 +19,7 @@ export class LoomEngine {
     this.active=null; this.timer=null; this.error=null; this.lastTick=null;
     this.sentControls=new Set();
     this.controlActive=null;
-    this.coordinationActive=null; this.coordinationRetryAt=0;
+    this.coordinationActive=new Map(); this.coordinationRetryAt=new Map(); this.lastCoordinationWorkspace=null;
     this.verifications=new Map();
   }
 
@@ -54,7 +55,8 @@ export class LoomEngine {
   async command(input,actor) {
     if(input.type==='work.retryAcceptance') return this.retryAcceptance(input,actor);
     if(isUserCleanupCommand(input.type)) return this.store.command(input,actor);
-    if(['work.addReport','work.resolveWait'].includes(input.type)) {
+    if(input.type==='work.resolveWait') throw Object.assign(new Error('复查结果须由当前项目的协调会话提交'),{code:'FORBIDDEN'});
+    if(input.type==='work.addReport') {
       return this.store.command(input,actor,{coordinatorSessionId:this.context.getBus()?.sessionId});
     }
     const previous=this.store.replayCommand(input,actor);
@@ -179,9 +181,10 @@ export class LoomEngine {
 
   async cycle() {
     this.abort.signal.throwIfAborted();
-    this.store.syncWorkspaces(this.native.workspaces());
+    const workspaces=this.native.workspaces();
+    this.store.syncWorkspaces(workspaces);
     await this.control();
-    if(this.context.dispatchExternalWait) this.coordinateWaiting();
+    if(this.context.dispatchExternalWait) this.coordinateWaiting(workspaces);
     else this.store.wakeWaiting();
     for(const run of this.store.recoverableRuns()) {
       this.abort.signal.throwIfAborted();
@@ -196,18 +199,28 @@ export class LoomEngine {
     return this.status();
   }
 
-  coordinateWaiting() {
-    if(this.coordinationActive!==null || Date.now()<this.coordinationRetryAt) return;
-    const waiting=this.store.nextExternalWait();
-    if(waiting===null) return;
-    this.coordinationActive=this.context.dispatchExternalWait(()=>{
-      this.abort.signal.throwIfAborted();
-      return this.store.claimExternalWait(waiting.id,waiting.version);
-    }).catch(error=>{
-      if(this.abort.signal.aborted) return;
-      this.coordinationRetryAt=Date.now()+60000;
-      this.ctx.logger.error(error);
-    }).finally(()=>{this.coordinationActive=null;});
+  coordinateWaiting(workspaces) {
+    if(this.abort.signal.aborted) return;
+    const at=new Date().toISOString();
+    const start=workspaces.findIndex(project=>project.workspaceId===this.lastCoordinationWorkspace)+1;
+    for(let offset=0;offset<workspaces.length;offset++) {
+      if(this.coordinationActive.size>=MAX_PROJECT_COORDINATORS) return;
+      const {workspaceId}=workspaces[(start+offset)%workspaces.length];
+      if(this.coordinationActive.has(workspaceId) || Date.now()<(this.coordinationRetryAt.get(workspaceId)??0)) continue;
+      const waiting=this.store.nextExternalWait(at,workspaceId);
+      if(waiting===null) continue;
+      this.coordinationRetryAt.delete(workspaceId);
+      const task=this.context.dispatchExternalWait(workspaceId,()=>{
+        if(this.abort.signal.aborted) return null;
+        return this.store.claimExternalWait(waiting.id,waiting.version);
+      }).catch(error=>{
+        if(this.abort.signal.aborted) return;
+        this.coordinationRetryAt.set(workspaceId,Date.now()+60000);
+        this.ctx.logger.error(error);
+      }).finally(()=>this.coordinationActive.delete(workspaceId));
+      this.coordinationActive.set(workspaceId,task);
+      this.lastCoordinationWorkspace=workspaceId;
+    }
   }
 
   schedule(run) {
@@ -318,15 +331,15 @@ export class LoomEngine {
       return;
     }
     const candidate=current.run.reports.findLast(({source})=>source.sessionId===run.sessionId && source.requestId===run.requestId && source.turn===completion.turn &&
-      observation.reportReceipts.some(receipt=>receipt.callId===source.callId && receipt.turn===source.turn && receipt.isError===false && receipt.seq<completion.endSeq));
+      observation.reportReceipts.some(receipt=>sameReportInvocation(receipt,source) && receipt.isError===false && receipt.seq<completion.endSeq));
     if(candidate===undefined && (current.run.reports.length || current.work.outputs.length)) {
-      const evidence=current.run.reports.map(({source})=>({source,receipt:observation.reportReceipts.find(receipt=>receipt.turn===source.turn && receipt.callId===source.callId)??null}));
+      const evidence=current.run.reports.map(({source})=>({source,receipt:observation.reportReceipts.find(receipt=>sameReportInvocation(receipt,source))??null}));
       const message=evidence.length?'工作报告回执未确认：'+evidence.map(({source,receipt})=>`${source.callId}@${source.turn} ${receipt?.isError===true?'原生工具失败':'缺少所属轮次成功回执'}`).join('；'):'工作声明了输出，但缺少成功报告';
       this.saveObservation(this.store.getRun(runId),observation,message,state.pendingInput);
       this.store.finishRun(run.id,{reason:completion.reason,summary:completion.summary,eventCursor:completion.endSeq,checks:[],review:{passed:false,summary:message,source:'native-report',evidence}});
       return;
     }
-    if(candidate && ['wait','uncertain'].includes(candidate.report.kind)) {
+    if(candidate && ['wait','uncertain','help'].includes(candidate.report.kind)) {
       this.store.settleReport(run.id,{callId:candidate.source.callId,eventCursor:completion.endSeq,coordinate:Boolean(this.context.dispatchExternalWait)});
       return;
     }
@@ -431,7 +444,7 @@ export class LoomEngine {
     this.abort.abort();
     const tasks=[...this.verifications.values()];
     for(const task of tasks) task.controller.abort();
-    const results=await Promise.allSettled([this.active,this.controlActive,this.coordinationActive,...tasks.map(async task=>{
+    const results=await Promise.allSettled([this.active,this.controlActive,this.context.stopCoordination?.(),...this.coordinationActive.values(),...tasks.map(async task=>{
       try {await task.task;}
       catch(error) {
         if(error.code!=='CHECK_STOP_UNCONFIRMED') throw error;
